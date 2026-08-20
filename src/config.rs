@@ -12,6 +12,12 @@ const DEFAULT_INTERFACE_NAME: &str = "corplink";
 
 pub const PLATFORM_LDAP: &str = "ldap";
 pub const PLATFORM_CORPLINK: &str = "feilian";
+// Email verification login for newer feilian deployments where /api/lookup is
+// unavailable. It follows the server's "feilian" login order but skips the
+// per-user lookup and goes directly through code send/verify.
+pub const PLATFORM_CORPLINK_EMAIL: &str = "feilian_email";
+// QR-code login through the current feilian /api/login/token flow.
+pub const PLATFORM_CORPLINK_QR: &str = "feilian_qr";
 // new feilian login that uses the v1 API (/api/v1/login with an AES-encrypted
 // password), as served by the newer feilian backend. opt-in via config.
 pub const PLATFORM_CORPLINK_V1: &str = "feilian_v1";
@@ -68,6 +74,9 @@ pub struct Config {
     pub state: Option<State>,
     pub vpn_server_name: Option<String>,
     pub vpn_select_strategy: Option<String>,
+    /// Preferred VPN MFA method: "push", "email", "mobile", or "otp". When omitted or
+    /// unavailable, the first supported method returned by the server is used.
+    pub vpn_mfa_type: Option<String>,
     pub use_vpn_dns: Option<bool>,
     pub dns_backup_filename: Option<String>,
     pub auto_setup_routes: Option<bool>,

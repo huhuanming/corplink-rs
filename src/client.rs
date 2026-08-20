@@ -21,8 +21,9 @@ use sha2::Digest;
 
 use crate::api::{ApiName, ApiUrl, CORPLINK_APP_VERSION, URL_GET_COMPANY};
 use crate::config::{
-    Config, WgConf, PLATFORM_CORPLINK, PLATFORM_CORPLINK_V1, PLATFORM_LARK, PLATFORM_LDAP,
-    PLATFORM_OIDC, STRATEGY_DEFAULT, STRATEGY_LATENCY,
+    Config, WgConf, PLATFORM_CORPLINK, PLATFORM_CORPLINK_EMAIL, PLATFORM_CORPLINK_QR,
+    PLATFORM_CORPLINK_V1, PLATFORM_LARK, PLATFORM_LDAP, PLATFORM_OIDC, STRATEGY_DEFAULT,
+    STRATEGY_LATENCY,
 };
 use crate::qrcode::TerminalQrCode;
 use crate::resp::*;
@@ -31,6 +32,31 @@ use crate::totp::{totp_offset, TIME_STEP};
 use crate::utils;
 
 const COOKIE_FILE_SUFFIX: &str = "cookies.json";
+const SIGN_ROOT_KEY_VERSION: u64 = 1;
+const SIGN_SECRET: &[u8] = b"TOK@@AoNfRIX+3bla%";
+const SIGN_HASH_BLOCK_SIZE: usize = 64;
+const SIGN_HASH_OUTPUT_SIZE: usize = 32;
+const VPN_MFA_REQUIRED_CODE: i32 = 3002;
+const VPN_MFA_SCENE: &str = "vpn";
+
+fn select_supported_vpn_mfa_type<'a>(
+    info: &'a RespVpnMfaType,
+    preferred: Option<&str>,
+) -> Option<&'a str> {
+    let mut offered = info
+        .vpn_types
+        .iter()
+        .chain(info.types.iter())
+        .map(String::as_str);
+    if let Some(preferred) =
+        preferred.filter(|preferred| matches!(*preferred, "push" | "email" | "mobile" | "otp"))
+    {
+        if let Some(kind) = offered.clone().find(|kind| *kind == preferred) {
+            return Some(kind);
+        }
+    }
+    offered.find(|kind| matches!(*kind, "push" | "email" | "mobile" | "otp"))
+}
 
 fn merge_additional_routes(
     mut routes: Vec<String>,
@@ -56,10 +82,7 @@ fn merge_additional_routes(
     routes
 }
 
-async fn resolve_additional_domains(
-    domains: &[String],
-    has_ipv6_address: bool,
-) -> Vec<String> {
+async fn resolve_additional_domains(domains: &[String], has_ipv6_address: bool) -> Vec<String> {
     let mut routes = Vec::new();
     for configured_domain in domains {
         let domain = configured_domain.trim();
@@ -114,6 +137,88 @@ async fn resolve_additional_domains(
     routes
 }
 
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; SIGN_HASH_OUTPUT_SIZE] {
+    let mut key_block = [0u8; SIGN_HASH_BLOCK_SIZE];
+    if key.len() > SIGN_HASH_BLOCK_SIZE {
+        key_block[..SIGN_HASH_OUTPUT_SIZE].copy_from_slice(&sha2::Sha256::digest(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; SIGN_HASH_BLOCK_SIZE];
+    let mut opad = [0x5cu8; SIGN_HASH_BLOCK_SIZE];
+    for i in 0..SIGN_HASH_BLOCK_SIZE {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+
+    let mut inner = sha2::Sha256::new();
+    inner.update(ipad);
+    inner.update(data);
+    let inner = inner.finalize();
+
+    let mut outer = sha2::Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+fn hkdf_sha256(secret: &[u8], salt: &[u8], info: &[u8], len: usize) -> Vec<u8> {
+    let zero_salt = [0u8; SIGN_HASH_OUTPUT_SIZE];
+    let prk = if salt.is_empty() {
+        hmac_sha256(&zero_salt, secret)
+    } else {
+        hmac_sha256(salt, secret)
+    };
+
+    let mut okm = Vec::with_capacity(len);
+    let mut previous = Vec::new();
+    let mut counter = 1u8;
+    while okm.len() < len {
+        let mut input = Vec::with_capacity(previous.len() + info.len() + 1);
+        input.extend_from_slice(&previous);
+        input.extend_from_slice(info);
+        input.push(counter);
+        previous = hmac_sha256(&prk, &input).to_vec();
+        okm.extend_from_slice(&previous);
+        counter = counter.wrapping_add(1);
+    }
+    okm.truncate(len);
+    okm
+}
+
+fn write_pb_varint(mut value: u64, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn write_pb_field_varint(field: u64, value: u64, out: &mut Vec<u8>) {
+    write_pb_varint(field << 3, out);
+    write_pb_varint(value, out);
+}
+
+fn write_pb_field_bytes(field: u64, value: &[u8], out: &mut Vec<u8>) {
+    write_pb_varint((field << 3) | 2, out);
+    write_pb_varint(value.len() as u64, out);
+    out.extend_from_slice(value);
+}
+
+fn encode_sign_header(signing_input_params: u64, signing_result: &[u8]) -> String {
+    let mut body = Vec::with_capacity(40);
+    write_pb_field_varint(1, SIGN_ROOT_KEY_VERSION, &mut body);
+    write_pb_field_varint(3, signing_input_params, &mut body);
+    write_pb_field_bytes(4, signing_result, &mut body);
+
+    use base64::Engine;
+    format!(
+        "v1;{}",
+        base64::engine::general_purpose::STANDARD.encode(body)
+    )
+}
+
 fn corplink_client_builder() -> ClientBuilder {
     ClientBuilder::new()
         // CorpLink deployments may use certificates signed by their own CA.
@@ -121,7 +226,7 @@ fn corplink_client_builder() -> ClientBuilder {
         // for debug
         // .proxy(reqwest::Proxy::all("socks5://192.168.111.233:8001").unwrap())
         .user_agent(format!(
-            "CorpLink/{CORPLINK_APP_VERSION} (GooglePixel; Android 10; en)"
+            "CorpLink/{CORPLINK_APP_VERSION} (linux; Linux; en)"
         ))
         .timeout(Duration::from_millis(10000))
 }
@@ -194,12 +299,13 @@ impl Client {
         let mut cookie_store = {
             let file = fs::File::open(&cookie_file).map(io::BufReader::new);
             match file {
-                Ok(file) => CookieStore::load_json_all(file).or_else(|e| {
-                    bail!(
-                        "failed to load cookie store from {}: {e}",
+                Ok(file) => CookieStore::load_json_all(file).unwrap_or_else(|e| {
+                    log::warn!(
+                        "failed to load cookie store from {}, using empty store: {e}",
                         cookie_file.display()
-                    )
-                })?,
+                    );
+                    CookieStore::default()
+                }),
                 Err(_) => CookieStore::default(),
             }
         };
@@ -264,18 +370,33 @@ impl Client {
     }
 
     fn save_cookie(&self) -> Result<()> {
+        let f = self
+            .conf
+            .conf_file
+            .as_ref()
+            .context("config file path missing")?;
         let interface_name = self
             .conf
             .interface_name
             .as_ref()
             .context("interface name missing in config")?;
+        let dir = match path::Path::new(f).parent() {
+            Some(dir) => dir,
+            None => path::Path::new("."),
+        };
+        let cookie_file = dir.join(format!("{}_{}", interface_name, COOKIE_FILE_SUFFIX));
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .append(false)
-            .open(format!("{}_{}", interface_name, COOKIE_FILE_SUFFIX))
+            .open(&cookie_file)
             .map(io::BufWriter::new)
-            .with_context(|| "failed to open cookie file for writing")?;
+            .with_context(|| {
+                format!(
+                    "failed to open cookie file for writing: {}",
+                    cookie_file.display()
+                )
+            })?;
         let c = self
             .cookie
             .lock()
@@ -285,29 +406,175 @@ impl Client {
         Ok(())
     }
 
+    fn cookie_header_for_url(&self, url: &Url) -> Result<Option<header::HeaderValue>> {
+        Ok(ReqwestCookieStore::cookies(self.cookie.as_ref(), url))
+    }
+
+    fn csrf_token_for_url(&self, url: &Url) -> Result<Option<header::HeaderValue>> {
+        self.cookie_value_for_url(url, "csrf-token")
+            .and_then(|value| {
+                value
+                    .map(|value| {
+                        header::HeaderValue::from_str(&value)
+                            .context("invalid csrf-token header value")
+                    })
+                    .transpose()
+            })
+    }
+
+    fn cookie_value_for_url(&self, url: &Url, name: &str) -> Result<Option<String>> {
+        let cookie_store = self
+            .cookie
+            .lock()
+            .map_err(|e| anyhow!("failed to lock cookie store: {e}"))?;
+        let Some(domain) = url.domain().or_else(|| url.host_str()) else {
+            return Ok(None);
+        };
+        Ok(cookie_store
+            .get(domain, "/", name)
+            .map(|cookie| cookie.value().to_string()))
+    }
+
+    fn signing_input_params(api: &ApiName) -> Option<u64> {
+        match api {
+            ApiName::ListVPN => Some(510),
+            ApiName::ConnectVPN => Some(542),
+            _ => None,
+        }
+    }
+
+    fn sign_request(
+        &self,
+        api: &ApiName,
+        method: &str,
+        url: &Url,
+        body: Option<&str>,
+        cookie_header: Option<&header::HeaderValue>,
+        csrf_token: Option<&header::HeaderValue>,
+    ) -> Result<Option<String>> {
+        let Some(signing_input_params) = Self::signing_input_params(api) else {
+            return Ok(None);
+        };
+        let device_id = self
+            .conf
+            .device_id
+            .as_deref()
+            .context("device_id missing in config; required for request signing")?;
+        let info = format!("{}|{}", self.conf.company_name, device_id);
+        let key = hkdf_sha256(SIGN_SECRET, &[], info.as_bytes(), SIGN_HASH_OUTPUT_SIZE);
+
+        let cookie = cookie_header
+            .map(|value| value.to_str().context("invalid Cookie header for signing"))
+            .transpose()?
+            .unwrap_or("");
+        let csrf = csrf_token
+            .map(|value| {
+                value
+                    .to_str()
+                    .context("invalid csrf-token header for signing")
+            })
+            .transpose()?
+            .unwrap_or("");
+        let body_hash = body
+            .filter(|body| !body.is_empty())
+            .map(|body| sha2::Sha256::digest(body.as_bytes()).to_vec())
+            .unwrap_or_default();
+        let vpn_token = if matches!(api, ApiName::ConnectVPN) {
+            self.cookie_value_for_url(url, "vpn-token")?
+                .context("vpn-token cookie missing; required for connect request signing")?
+        } else {
+            String::new()
+        };
+
+        let fields: [&[u8]; 10] = [
+            b"",
+            method.as_bytes(),
+            url.path().as_bytes(),
+            url.query().unwrap_or("").as_bytes(),
+            body_hash.as_slice(),
+            cookie.as_bytes(),
+            b"",
+            csrf.as_bytes(),
+            b"",
+            vpn_token.as_bytes(),
+        ];
+
+        let mut canonical = Vec::new();
+        for (index, value) in fields.iter().enumerate().skip(1) {
+            if (signing_input_params & (1 << index)) != 0 {
+                canonical.extend_from_slice(value);
+            }
+        }
+
+        let signing_result = hmac_sha256(&key, &canonical);
+        Ok(Some(encode_sign_header(
+            signing_input_params,
+            &signing_result,
+        )))
+    }
+
     async fn request<T: DeserializeOwned + fmt::Debug>(
         &mut self,
         api: ApiName,
         body: Option<Map<String, Value>>,
     ) -> Result<Resp<T>> {
         let url = self.api_url.get_api_url(&api);
+        self.request_at(api, url, body).await
+    }
 
-        let rb = match body {
-            Some(body) => {
-                let body = serde_json::to_string(&body)
-                    .with_context(|| format!("failed to serialize request body for {api:?}"))?;
-                self.c
-                    .post(url)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(body)
-            }
+    async fn request_at<T: DeserializeOwned + fmt::Debug>(
+        &mut self,
+        api: ApiName,
+        url: String,
+        body: Option<Map<String, Value>>,
+    ) -> Result<Resp<T>> {
+        let sensitive_qr_request = matches!(&api, ApiName::LoginQrToken | ApiName::LoginQrCheck);
+        let parsed_url = Url::from_str(&url).with_context(|| format!("invalid url for {api:?}"))?;
+        let body = body
+            .map(|body| {
+                serde_json::to_string(&body)
+                    .with_context(|| format!("failed to serialize request body for {api:?}"))
+            })
+            .transpose()?;
+        let method = if body.is_some() { "POST" } else { "GET" };
+        let cookie_header = self.cookie_header_for_url(&parsed_url)?;
+        let csrf_token = self.csrf_token_for_url(&parsed_url)?;
+        let sign_header = self.sign_request(
+            &api,
+            method,
+            &parsed_url,
+            body.as_deref(),
+            cookie_header.as_ref(),
+            csrf_token.as_ref(),
+        )?;
+
+        let mut rb = match body {
+            Some(body) => self
+                .c
+                .post(url)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body),
             None => self.c.get(url),
         };
+        if let Some(cookie_header) = cookie_header {
+            rb = rb.header(header::COOKIE, cookie_header);
+        }
+        if let Some(csrf_token) = csrf_token {
+            rb = rb.header("csrf-token", csrf_token);
+        }
+        if let Some(sign_header) = sign_header {
+            rb = rb.header("sign", sign_header);
+        }
 
-        let resp = rb
-            .send()
-            .await
-            .with_context(|| format!("request {api:?} failed"))?;
+        let resp = if sensitive_qr_request {
+            rb.send()
+                .await
+                .map_err(|_| anyhow!("request {api:?} failed"))?
+        } else {
+            rb.send()
+                .await
+                .with_context(|| format!("request {api:?} failed"))?
+        };
 
         if !resp.status().is_success() {
             let msg = format!("logout because of bad resp code: {}", resp.status());
@@ -334,9 +601,14 @@ impl Client {
         // and bypass the code-based logout/retry handling, leaving a stale-session
         // run dead with a confusing parse error. So only coerce `data` into T once
         // we know code == 0; otherwise keep the code/message so callers can react.
-        let raw: Resp<Value> = serde_json::from_str(&text).with_context(|| {
-            format!("failed to parse response envelope for api {api:?}: {text}")
-        })?;
+        let raw: Resp<Value> = if sensitive_qr_request {
+            serde_json::from_str(&text)
+                .with_context(|| format!("failed to parse response envelope for api {api:?}"))?
+        } else {
+            serde_json::from_str(&text).with_context(|| {
+                format!("failed to parse response envelope for api {api:?}: {text}")
+            })?
+        };
         let data = match (raw.code, raw.data) {
             (0, Some(v)) => Some(
                 serde_json::from_value::<T>(v)
@@ -350,8 +622,48 @@ impl Client {
             data,
             action: raw.action,
         };
-        log::debug!("api {:#?} resp: {:#?}", api, resp);
+        if sensitive_qr_request {
+            log::debug!("api {:#?} response code: {}", api, resp.code);
+        } else {
+            log::debug!("api {:#?} resp: {:#?}", api, resp);
+        }
         Ok(resp)
+    }
+
+    async fn request_form<T: DeserializeOwned + fmt::Debug>(
+        &mut self,
+        api: ApiName,
+        form: &[(&str, &str)],
+    ) -> Result<Resp<T>> {
+        let url = self.api_url.get_api_url(&api);
+        let parsed_url = Url::from_str(&url).with_context(|| format!("invalid url for {api:?}"))?;
+        let cookie_header = self.cookie_header_for_url(&parsed_url)?;
+        let csrf_token = self.csrf_token_for_url(&parsed_url)?;
+        let mut request = self.c.post(url).form(form);
+        if let Some(cookie_header) = cookie_header {
+            request = request.header(header::COOKIE, cookie_header);
+        }
+        if let Some(csrf_token) = csrf_token {
+            request = request.header("csrf-token", csrf_token);
+        }
+
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("request {api:?} failed"))?;
+        if !response.status().is_success() {
+            let message = format!("logout because of bad resp code: {}", response.status());
+            self.handle_logout_err(message).await?;
+        }
+        self.parse_time_offset_from_date_header(&response);
+        if response.headers().contains_key(header::SET_COOKIE) {
+            log::info!("found set-cookie in header, saving cookie");
+            self.save_cookie()?;
+        }
+        response
+            .json::<Resp<T>>()
+            .await
+            .with_context(|| format!("failed to parse response for api {api:?}"))
     }
 
     fn parse_time_offset_from_date_header(&mut self, resp: &Response) {
@@ -415,11 +727,13 @@ impl Client {
         url: &String,
         token: &String,
     ) -> Result<String> {
-        log::info!("old token is: {token}");
+        log::info!("received third-party login token");
         log::info!("please scan the QR code or visit the following link to auth corplink:\n{url}");
         match TerminalQrCode::from_bytes(url.as_bytes()) {
             Ok(qr) => qr.print(),
-            Err(e) => {log::warn!("failed to generate qr code: {e}");}
+            Err(e) => {
+                log::warn!("failed to generate qr code: {e}");
+            }
         }
         match method {
             PLATFORM_LARK | PLATFORM_OIDC => {
@@ -436,6 +750,11 @@ impl Client {
     }
 
     async fn corplink_login(&mut self) -> Result<String> {
+        if self.conf.platform.as_deref() == Some(PLATFORM_CORPLINK_EMAIL) {
+            log::info!("try to login with code from email");
+            return self.login_with_email_v1().await;
+        }
+
         let resp = self.get_corplink_login_method().await?;
         for method in resp.auth {
             match method.as_str() {
@@ -481,7 +800,10 @@ impl Client {
 
     fn is_platform_or_default(&self, platform: &str) -> bool {
         if let Some(p) = &self.conf.platform {
-            return p.is_empty() || platform == p;
+            return p.is_empty()
+                || platform == p
+                || ([PLATFORM_CORPLINK_EMAIL, PLATFORM_CORPLINK_QR].contains(&p.as_str())
+                    && platform == PLATFORM_CORPLINK);
         }
         true
     }
@@ -582,7 +904,7 @@ impl Client {
                         let url = Url::parse(&otp_uri).context("failed to parse otp uri")?;
                         for (k, v) in url.query_pairs() {
                             if k == "secret" {
-                                log::info!("got 2fa token: {}", &v);
+                                log::info!("received and stored 2fa token");
                                 self.conf.code = Some(v.to_string());
                                 self.conf.save().await?;
                                 break;
@@ -613,6 +935,9 @@ impl Client {
             return self.login_v1().await;
         }
         let resp = self.get_login_method().await?;
+        if self.conf.platform.as_deref() == Some(PLATFORM_CORPLINK_QR) {
+            return self.login_with_qr(&resp).await;
+        }
         let tps_login_resp = self.get_tps_login_method().await?;
         let mut tps_login = HashMap::new();
         for resp in tps_login_resp {
@@ -635,7 +960,7 @@ impl Client {
             let url = Url::parse(&otp_uri).context("failed to parse otp uri")?;
             for (k, v) in url.query_pairs() {
                 if k == "secret" {
-                    log::info!("got 2fa token: {}", &v);
+                    log::info!("received and stored 2fa token");
                     self.conf.code = Some(v.to_string());
                     self.conf.save().await?;
                     break;
@@ -730,9 +1055,133 @@ impl Client {
         m.insert("code_type".to_string(), json!("email"));
         m.insert("user_name".to_string(), json!(&self.conf.username));
 
-        self.request::<Map<String, Value>>(ApiName::RequestEmailCode, Some(m))
+        let resp = self
+            .request::<Map<String, Value>>(ApiName::RequestEmailCode, Some(m))
             .await?;
-        Ok(())
+        match resp.code {
+            0 => Ok(()),
+            _ => {
+                let msg = resp
+                    .message
+                    .unwrap_or_else(|| "failed to request email code".to_string());
+                bail!(msg)
+            }
+        }
+    }
+
+    async fn request_email_code_v1(&mut self) -> Result<()> {
+        let mut m = Map::new();
+        m.insert("account".to_string(), json!(&self.conf.username));
+        m.insert("login_scene".to_string(), json!(PLATFORM_CORPLINK));
+        m.insert("account_type".to_string(), json!("email"));
+        m.insert("login_type".to_string(), json!("email"));
+
+        let resp = self
+            .request::<Map<String, Value>>(ApiName::RequestEmailCodeV1, Some(m))
+            .await?;
+        match resp.code {
+            0 => Ok(()),
+            _ => {
+                let msg = resp
+                    .message
+                    .unwrap_or_else(|| "failed to request email code".to_string());
+                bail!(msg)
+            }
+        }
+    }
+
+    async fn login_with_email_v1(&mut self) -> Result<String> {
+        log::info!("try to request code for email");
+        self.request_email_code_v1().await?;
+
+        log::info!("input your code from email:");
+        let input = utils::read_line().await?;
+        let code = input.trim();
+        let mut m = Map::new();
+        m.insert("account".to_string(), json!(&self.conf.username));
+        m.insert("login_scene".to_string(), json!(PLATFORM_CORPLINK));
+        m.insert("account_type".to_string(), json!("email"));
+        m.insert("login_type".to_string(), json!("email"));
+        m.insert("code".to_string(), json!(code));
+
+        let resp = self
+            .request::<RespLoginV1>(ApiName::LoginEmailV1, Some(m))
+            .await?;
+        match resp.code {
+            0 => {
+                let data = resp.data.context("email login response missing data")?;
+                if data.result != "success" {
+                    bail!("email login returned unexpected result: {}", data.result);
+                }
+                Ok(String::new())
+            }
+            _ => {
+                let msg = resp
+                    .message
+                    .unwrap_or_else(|| "failed to login with email code".to_string());
+                bail!(msg)
+            }
+        }
+    }
+
+    async fn login_with_qr(&mut self, login_method: &RespLoginMethod) -> Result<()> {
+        let scan_base = login_method
+            .scan_code_login_url
+            .as_deref()
+            .context("server did not provide a QR login URL")?;
+        let token_resp = self
+            .request::<RespQrToken>(ApiName::LoginQrToken, None)
+            .await?;
+        if token_resp.code != 0 {
+            bail!(
+                "failed to request QR login token: {}",
+                token_resp.message.unwrap_or_default()
+            );
+        }
+        let token = token_resp
+            .data
+            .context("QR login token response missing data")?
+            .token;
+
+        let mut scan_url = Url::parse(scan_base).context("invalid QR login URL")?;
+        scan_url.query_pairs_mut().append_pair("token", &token);
+        log::info!("scan this QR code with the feilian mobile app and confirm login:");
+        TerminalQrCode::from_bytes(scan_url.as_str().as_bytes())
+            .context("failed to generate QR code")?
+            .print();
+        drop(scan_url);
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if Instant::now() >= deadline {
+                bail!("QR login timed out; request a new QR code")
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let check_url = self.api_url.get_qr_check_url(&token)?;
+            let resp = self
+                .request_at::<RespQrCheck>(ApiName::LoginQrCheck, check_url, None)
+                .await?;
+            match resp.code {
+                0 => {
+                    let result = resp.data.unwrap_or(RespQrCheck {
+                        result: String::new(),
+                    });
+                    if result.result == "success" {
+                        log::info!("QR login success");
+                        self.change_state(State::Login).await?;
+                        return Ok(());
+                    }
+                }
+                1005 => continue,
+                _ => {
+                    bail!(
+                        "QR login failed: {}",
+                        resp.message
+                            .unwrap_or_else(|| format!("code {}", resp.code))
+                    )
+                }
+            }
+        }
     }
 
     async fn login_with_email(&mut self) -> Result<String> {
@@ -747,6 +1196,7 @@ impl Client {
         m.insert("forget_password".to_string(), json!(false));
         m.insert("code_type".to_string(), json!("email"));
         m.insert("code".to_string(), json!(code));
+        m.insert("user_name".to_string(), json!(&self.conf.username));
 
         let resp = self
             .request::<RespLogin>(ApiName::LoginEmail, Some(m))
@@ -754,8 +1204,7 @@ impl Client {
         match resp.code {
             0 => Ok(resp.data.context("email login response missing data")?.url),
             _ => bail!(format!(
-                "failed to login with email code {}: {}",
-                code,
+                "failed to login with email code: {}",
                 resp.message.unwrap_or_else(|| "unknown error".to_string())
             )),
         }
@@ -806,7 +1255,11 @@ impl Client {
                 Ok(response) => {
                     log::info!(
                         "server name {}, latency {}ms",
-                        vpn.en_name,
+                        if vpn.en_name.is_empty() {
+                            &vpn.name
+                        } else {
+                            &vpn.en_name
+                        },
                         response.latency_ms
                     );
                     let should_replace = match &fastest {
@@ -862,7 +1315,11 @@ impl Client {
                     Ok(response) => {
                         log::info!(
                             "server name {}, latency {}ms",
-                            vpn.en_name,
+                            if vpn.en_name.is_empty() {
+                                &vpn.name
+                            } else {
+                                &vpn.en_name
+                            },
                             response.latency_ms
                         );
                         return Some(SelectedVpn {
@@ -949,6 +1406,51 @@ impl Client {
         Ok(url)
     }
 
+    fn store_vpn_probe_cookies(
+        &self,
+        headers: &[header::HeaderValue],
+        endpoint_url: &Url,
+    ) -> Result<()> {
+        ReqwestCookieStore::set_cookies(self.cookie.as_ref(), &mut headers.iter(), endpoint_url);
+
+        if self
+            .cookie_value_for_url(endpoint_url, "vpn-token")?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        // Some current deployments expose the probe on HTTP while returning a
+        // Secure vpn-token cookie. A browser cookie store correctly rejects that
+        // combination, but the native client still uses the token to sign the
+        // subsequent request to this same authenticated endpoint. Recover only
+        // this explicitly required cookie and do not relax handling for others.
+        for header in headers {
+            let Ok(value) = header.to_str() else {
+                continue;
+            };
+            let Ok(raw_cookie) = RawCookie::parse(value.to_string()) else {
+                continue;
+            };
+            if raw_cookie.name() != "vpn-token" {
+                continue;
+            }
+            let endpoint_cookie = Cookie::try_from_raw_cookie(
+                &RawCookie::new("vpn-token", raw_cookie.value().to_string()),
+                endpoint_url,
+            )
+            .context("failed to bind vpn-token to selected VPN endpoint")?;
+            self.cookie
+                .lock()
+                .map_err(|e| anyhow!("failed to lock cookie store: {e}"))?
+                .insert(endpoint_cookie, endpoint_url)
+                .context("failed to store vpn-token for selected VPN endpoint")?;
+            log::info!("stored vpn-token from selected VPN probe response");
+            break;
+        }
+        Ok(())
+    }
+
     // ping vpn and return latency in ms. Will return Err on error
     async fn ping_vpn(&self, ip: &str, api_port: u16) -> Result<VpnProbeResponse> {
         let endpoint_url = self.vpn_endpoint_url(ip, api_port)?;
@@ -1003,11 +1505,7 @@ impl Client {
                 let offset = self.date_offset_sec / TIME_STEP as i32;
                 let raw_otp = totp_offset(code.as_slice(), offset);
                 otp = format!("{:06}", raw_otp.code);
-                log::info!(
-                    "2fa code generated: {}, {} seconds left",
-                    &otp,
-                    raw_otp.secs_left
-                );
+                log::info!("2fa code generated; {} seconds left", raw_otp.secs_left);
             }
         }
         if otp.is_empty() {
@@ -1017,6 +1515,11 @@ impl Client {
             );
             if is_tps_login {
                 log::info!("use empty 2fa code (tps login already verified)");
+            } else if matches!(
+                self.conf.platform.as_deref(),
+                Some(PLATFORM_CORPLINK_EMAIL | PLATFORM_CORPLINK_QR | PLATFORM_CORPLINK_V1)
+            ) {
+                log::info!("try current VPN MFA flow");
             } else {
                 log::info!("input your 2fa code:");
                 otp = utils::read_line().await?;
@@ -1025,9 +1528,19 @@ impl Client {
         let mut m = Map::new();
         m.insert("public_key".to_string(), json!(public_key));
         m.insert("otp".to_string(), json!(otp));
-        let resp = self
+        let mut resp = self
             .request::<RespWgInfo>(ApiName::ConnectVPN, Some(m))
             .await?;
+        if resp.code == VPN_MFA_REQUIRED_CODE {
+            self.complete_vpn_mfa((!otp.is_empty()).then_some(otp.as_str()))
+                .await?;
+            let mut retry = Map::new();
+            retry.insert("public_key".to_string(), json!(public_key));
+            retry.insert("otp".to_string(), json!(""));
+            resp = self
+                .request::<RespWgInfo>(ApiName::ConnectVPN, Some(retry))
+                .await?;
+        }
         match resp.code {
             0 => resp.data.context("connect vpn response missing data"),
             101 => {
@@ -1045,6 +1558,97 @@ impl Client {
         }
     }
 
+    async fn complete_vpn_mfa(&mut self, existing_otp: Option<&str>) -> Result<()> {
+        let methods = self
+            .request::<RespVpnMfaType>(ApiName::VpnMfaType, None)
+            .await?;
+        if methods.code != 0 {
+            bail!(
+                "failed to get VPN MFA methods with error {}: {}",
+                methods.code,
+                methods.message.unwrap_or_default()
+            );
+        }
+        let methods = methods.data.unwrap_or_default();
+        let code_type = select_supported_vpn_mfa_type(&methods, self.conf.vpn_mfa_type.as_deref())
+            .with_context(|| {
+                format!(
+                    "no supported VPN MFA method; server offered {:?}",
+                    methods
+                        .vpn_types
+                        .iter()
+                        .chain(methods.types.iter())
+                        .collect::<Vec<_>>()
+                )
+            })?;
+
+        if code_type == "push" {
+            let sent = self
+                .request_form::<Map<String, Value>>(
+                    ApiName::VpnMfaPush,
+                    &[("mfa_type", "push"), ("mfa_scene", VPN_MFA_SCENE)],
+                )
+                .await?;
+            if sent.code != 0 {
+                bail!(
+                    "failed to send VPN push confirmation with error {}: {}",
+                    sent.code,
+                    sent.message.unwrap_or_default()
+                );
+            }
+            log::info!(
+                "VPN push confirmation sent; approve it in FeiLian, then press Enter to continue"
+            );
+            utils::read_line().await?;
+            return Ok(());
+        }
+
+        let code = match code_type {
+            "email" | "mobile" => {
+                let mut send = Map::new();
+                send.insert("mfa_scene".to_string(), json!(VPN_MFA_SCENE));
+                send.insert("code_type".to_string(), json!(code_type));
+                let sent = self
+                    .request::<Map<String, Value>>(ApiName::VpnMfaSend, Some(send))
+                    .await?;
+                if sent.code != 0 {
+                    bail!(
+                        "failed to send VPN MFA code with error {}: {}",
+                        sent.code,
+                        sent.message.unwrap_or_default()
+                    );
+                }
+                log::info!("input the VPN {code_type} verification code:");
+                utils::read_line().await?
+            }
+            "otp" => match existing_otp {
+                Some(code) => code.to_string(),
+                None => {
+                    log::info!("input your current FeiLian OTP code:");
+                    utils::read_line().await?
+                }
+            },
+            _ => unreachable!("unsupported MFA type was filtered out"),
+        };
+
+        let mut verify = Map::new();
+        verify.insert("mfa_scene".to_string(), json!(VPN_MFA_SCENE));
+        verify.insert("code_type".to_string(), json!(code_type));
+        verify.insert("code".to_string(), json!(code));
+        let verified = self
+            .request::<Map<String, Value>>(ApiName::VpnMfaVerify, Some(verify))
+            .await?;
+        if verified.code != 0 {
+            bail!(
+                "failed to verify VPN MFA code with error {}: {}",
+                verified.code,
+                verified.message.unwrap_or_default()
+            );
+        }
+        log::info!("VPN MFA verification succeeded");
+        Ok(())
+    }
+
     pub async fn connect_vpn(&mut self) -> Result<WgConf> {
         let vpn_info = self.list_vpn().await?;
 
@@ -1053,7 +1657,13 @@ impl Client {
             vpn_info.len(),
             vpn_info
                 .iter()
-                .map(|i| i.en_name.clone())
+                .map(|i| {
+                    if i.en_name.is_empty() {
+                        i.name.clone()
+                    } else {
+                        i.en_name.clone()
+                    }
+                })
                 .collect::<Vec<String>>()
         );
         let filtered_vpn = vpn_info
@@ -1061,7 +1671,15 @@ impl Client {
             .filter(|vpn| {
                 if let Some(server_name) = self.conf.vpn_server_name.clone() {
                     if vpn.en_name != server_name {
-                        log::info!("skip {}, expect {}", vpn.en_name, server_name);
+                        log::info!(
+                            "skip {}, expect {}",
+                            if vpn.en_name.is_empty() {
+                                &vpn.name
+                            } else {
+                                &vpn.en_name
+                            },
+                            server_name
+                        );
                         return false;
                     }
                 }
@@ -1079,7 +1697,11 @@ impl Client {
                     _ => {
                         log::info!(
                             "server name {} is not support {} wg for now",
-                            vpn.en_name,
+                            if vpn.en_name.is_empty() {
+                                &vpn.name
+                            } else {
+                                &vpn.en_name
+                            },
                             mode
                         );
                         false
@@ -1101,17 +1723,21 @@ impl Client {
         let vpn = &selected_vpn.vpn;
         let endpoint_url = self.prepare_vpn_endpoint(&vpn.ip, vpn.api_port)?;
         // Persist only cookies returned by the selected endpoint probe.
-        ReqwestCookieStore::set_cookies(
-            self.cookie.as_ref(),
-            &mut selected_vpn.set_cookie_headers.iter(),
-            &endpoint_url,
-        );
+        self.store_vpn_probe_cookies(&selected_vpn.set_cookie_headers, &endpoint_url)?;
         self.save_cookie()?;
         let vpn_addr = match vpn.ip.parse::<IpAddr>() {
             Ok(ip) => SocketAddr::new(ip, vpn.vpn_port).to_string(),
             Err(_) => format!("{}:{}", vpn.ip, vpn.vpn_port),
         };
-        log::info!("try connect to {}, address {}", vpn.en_name, vpn_addr);
+        log::info!(
+            "try connect to {}, address {}",
+            if vpn.en_name.is_empty() {
+                &vpn.name
+            } else {
+                &vpn.en_name
+            },
+            vpn_addr
+        );
 
         let key = self
             .conf
@@ -1190,22 +1816,14 @@ impl Client {
             }
         };
 
-        let mut additional_routes = self
-            .conf
-            .vpn_additional_routes
-            .clone()
-            .unwrap_or_default();
+        let mut additional_routes = self.conf.vpn_additional_routes.clone().unwrap_or_default();
         if let Some(domains) = self.conf.vpn_additional_domains.as_deref() {
-            additional_routes
-                .extend(resolve_additional_domains(domains, has_ipv6_address).await);
+            additional_routes.extend(resolve_additional_domains(domains, has_ipv6_address).await);
         }
         if !additional_routes.is_empty() {
             let before = allowed_ips.len();
-            allowed_ips = merge_additional_routes(
-                allowed_ips,
-                &additional_routes,
-                has_ipv6_address,
-            );
+            allowed_ips =
+                merge_additional_routes(allowed_ips, &additional_routes, has_ipv6_address);
             log::info!(
                 "additional VPN routes merged: {} -> {} entries",
                 before,
@@ -1271,11 +1889,8 @@ impl Client {
                 );
             }
         }
-        log::info!(
-            "final allowed_ips ({} entries): {:?}",
-            allowed_ips.len(),
-            allowed_ips
-        );
+        log::info!("final allowed_ips: {} entries", allowed_ips.len());
+        log::debug!("final allowed_ips: {:?}", allowed_ips);
         let auto_setup_routes = self.conf.auto_setup_routes.unwrap_or(true);
         let routes = if auto_setup_routes {
             allowed_ips.clone()
@@ -1418,16 +2033,96 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use reqwest::{header, Url};
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::{oneshot, Barrier};
     use tokio::time::{sleep, timeout};
 
-    use super::{merge_additional_routes, resolve_additional_domains, Client, ReqwestCookieStore};
+    use super::{
+        encode_sign_header, hkdf_sha256, merge_additional_routes, resolve_additional_domains,
+        select_supported_vpn_mfa_type, Client, ReqwestCookieStore,
+    };
     use crate::config::Config;
-    use crate::resp::RespVpnInfo;
+    use crate::resp::{RespVpnInfo, RespVpnMfaType};
     use crate::utils::apply_route_filters;
+
+    #[test]
+    fn hkdf_sha256_matches_rfc5869_case_1() {
+        let ikm = vec![0x0b; 22];
+        let salt = hex::decode("000102030405060708090a0b0c").unwrap();
+        let info = hex::decode("f0f1f2f3f4f5f6f7f8f9").unwrap();
+        let okm = hkdf_sha256(&ikm, &salt, &info, 42);
+        assert_eq!(
+            hex::encode(okm),
+            "3cb25f25faacd57a90434f64d0362f2a\
+             2d2d0a90cf1a5a4c5db02d56ecc4c5bf\
+             34007208d5b887185865"
+                .replace(char::is_whitespace, "")
+        );
+    }
+
+    #[test]
+    fn sign_header_uses_observed_wire_shape() {
+        let header = encode_sign_header(510, &[0x11; 32]);
+        assert!(header.starts_with("v1;"));
+        let encoded = header.trim_start_matches("v1;");
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(
+            hex::encode(bytes),
+            format!("080118fe032220{}", "11".repeat(32))
+        );
+    }
+
+    #[test]
+    fn vpn_mfa_selection_uses_server_order() {
+        let methods = RespVpnMfaType {
+            vpn_types: vec!["push".to_string(), "email".to_string(), "otp".to_string()],
+            types: vec!["mobile".to_string()],
+        };
+
+        assert_eq!(select_supported_vpn_mfa_type(&methods, None), Some("push"));
+    }
+
+    #[test]
+    fn vpn_mfa_selection_falls_back_to_general_types() {
+        let methods = RespVpnMfaType {
+            vpn_types: Vec::new(),
+            types: vec!["otp".to_string()],
+        };
+
+        assert_eq!(select_supported_vpn_mfa_type(&methods, None), Some("otp"));
+    }
+
+    #[test]
+    fn vpn_mfa_selection_honors_an_available_preference() {
+        let methods = RespVpnMfaType {
+            vpn_types: vec!["otp".to_string(), "email".to_string()],
+            types: Vec::new(),
+        };
+
+        assert_eq!(
+            select_supported_vpn_mfa_type(&methods, Some("email")),
+            Some("email")
+        );
+    }
+
+    #[test]
+    fn vpn_mfa_selection_honors_push_preference() {
+        let methods = RespVpnMfaType {
+            vpn_types: vec!["otp".to_string(), "push".to_string()],
+            types: Vec::new(),
+        };
+
+        assert_eq!(
+            select_supported_vpn_mfa_type(&methods, Some("push")),
+            Some("push")
+        );
+    }
 
     async fn start_probe_server(
         barrier: Arc<Barrier>,
@@ -1503,6 +2198,40 @@ mod tests {
         Client::new(conf).unwrap()
     }
 
+    #[test]
+    fn dedicated_feilian_platforms_follow_only_the_feilian_login_order() {
+        let mut client = test_client();
+        for platform in [
+            crate::config::PLATFORM_CORPLINK_EMAIL,
+            crate::config::PLATFORM_CORPLINK_QR,
+        ] {
+            client.conf.platform = Some(platform.to_string());
+
+            assert!(client.is_platform_or_default(crate::config::PLATFORM_CORPLINK));
+            assert!(!client.is_platform_or_default(crate::config::PLATFORM_LDAP));
+            assert!(!client.is_platform_or_default(crate::config::PLATFORM_LARK));
+        }
+    }
+
+    #[test]
+    fn vpn_probe_secure_token_is_bound_to_an_http_endpoint() {
+        let client = test_client();
+        let endpoint = Url::parse("http://192.0.2.1:80").unwrap();
+        let headers = vec![header::HeaderValue::from_static(
+            "vpn-token=test-token; Secure; HttpOnly; Path=/",
+        )];
+
+        client.store_vpn_probe_cookies(&headers, &endpoint).unwrap();
+
+        assert_eq!(
+            client
+                .cookie_value_for_url(&endpoint, "vpn-token")
+                .unwrap()
+                .as_deref(),
+            Some("test-token")
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_default_probe_preserves_order_and_isolates_cookie_state() {
         let barrier = Arc::new(Barrier::new(3));
@@ -1535,8 +2264,8 @@ mod tests {
         let second_request = second_request.await.unwrap().to_ascii_lowercase();
         assert!(first_request.contains("cookie: device_id=test-device"));
         assert!(second_request.contains("cookie: device_id=test-device"));
-        assert!(first_request.contains("user-agent: corplink/201000 "));
-        assert!(second_request.contains("user-agent: corplink/201000 "));
+        assert!(first_request.contains("user-agent: corplink/3.3.17 "));
+        assert!(second_request.contains("user-agent: corplink/3.3.17 "));
 
         {
             let cookie_store = client.cookie.lock().unwrap();

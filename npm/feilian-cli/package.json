@@ -1,0 +1,33 @@
+{
+  "name": "feilian-cli",
+  "version": "0.1.0",
+  "description": "Unofficial community CLI for Feilian/CorpLink with email, QR, VPN MFA, and SOCKS5 netstack support.",
+  "license": "GPL-2.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huhuanming/corplink-rs.git"
+  },
+  "homepage": "https://github.com/huhuanming/corplink-rs#readme",
+  "bugs": "https://github.com/huhuanming/corplink-rs/issues",
+  "keywords": [
+    "feilian",
+    "corplink",
+    "vpn",
+    "cli",
+    "socks5"
+  ],
+  "bin": {
+    "feilian-cli": "bin/feilian-cli"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/feilian-cli",
+    "README.md",
+    "license.txt"
+  ]
+}

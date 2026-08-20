@@ -2,6 +2,15 @@
 
 使用 rust 实现的 [飞连][1] 客户端，支持 Linux/Windows10/MacOS
 
+> 本仓库为非官方社区 fork，与飞连官方无隶属或背书关系。
+
+## npm（macOS Apple Silicon）
+
+```bash
+npm install --global feilian-cli
+feilian-cli /path/to/config.json
+```
+
 # 安装
 
 ## ArchLinux

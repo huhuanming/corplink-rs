@@ -27,6 +27,8 @@ pub struct RespLoginMethod {
     pub login_enable_ldap: bool,
     pub login_enable: bool,
     pub login_orders: Vec<String>,
+    #[serde(default)]
+    pub scan_code_login_url: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -54,6 +56,25 @@ pub struct RespLogin {
 pub struct RespLoginV1 {
     #[serde(default)]
     pub result: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct RespQrToken {
+    pub token: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct RespQrCheck {
+    #[serde(default)]
+    pub result: String,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+pub struct RespVpnMfaType {
+    #[serde(default)]
+    pub vpn_types: Vec<String>,
+    #[serde(default)]
+    pub types: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]

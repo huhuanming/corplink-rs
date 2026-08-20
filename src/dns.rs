@@ -334,6 +334,9 @@ mod tests {
     #[test]
     fn render_starts_with_comment_marker() {
         let out = render_resolv_conf(&["1.1.1.1"], &[]);
-        assert!(out.starts_with("# "), "expected a comment banner, got: {out}");
+        assert!(
+            out.starts_with("# "),
+            "expected a comment banner, got: {out}"
+        );
     }
 }

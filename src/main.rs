@@ -154,8 +154,14 @@ async fn run() -> Result<()> {
     let mut uapi = wg::UAPIClient { name: name.clone() };
     if let Some(listen) = &socks5_listen {
         log::info!("start wg-corplink (netstack/socks5) on {}", listen);
-        wg::start_wg_go_netstack(&wg_conf, listen, &socks5_username, &socks5_password, with_wg_log)
-            .context("failed to start wg-corplink in netstack mode")?;
+        wg::start_wg_go_netstack(
+            &wg_conf,
+            listen,
+            &socks5_username,
+            &socks5_password,
+            with_wg_log,
+        )
+        .context("failed to start wg-corplink in netstack mode")?;
         uapi.config_wg_netstack(&wg_conf)
             .await
             .context("failed to config netstack interface with uapi")?;
