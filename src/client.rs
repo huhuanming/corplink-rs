@@ -1574,7 +1574,7 @@ impl Client {
                         .chain(methods.types.iter())
                         .collect::<Vec<_>>()
                 )
-        })?;
+            })?;
 
         if code_type == "push" {
             let mut push = Map::new();
@@ -1590,10 +1590,29 @@ impl Client {
                     sent.message.unwrap_or_default()
                 );
             }
+            let message_id = sent
+                .data
+                .as_ref()
+                .and_then(|data| data.get("message_id"))
+                .and_then(Value::as_str)
+                .context("VPN push response missing message_id")?;
             log::info!(
                 "VPN push confirmation sent; approve it in FeiLian, then press Enter to continue"
             );
             utils::read_line().await?;
+            let mut revoke = Map::new();
+            revoke.insert("mfa_type".to_string(), json!("push"));
+            revoke.insert("message_id".to_string(), json!(message_id));
+            let revoked = self
+                .request::<Map<String, Value>>(ApiName::VpnMfaRevoke, Some(revoke))
+                .await?;
+            if revoked.code != 0 {
+                bail!(
+                    "failed to complete VPN push confirmation with error {}: {}",
+                    revoked.code,
+                    revoked.message.unwrap_or_default()
+                );
+            }
             return Ok(());
         }
 
