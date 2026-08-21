@@ -16,7 +16,7 @@ An unofficial cross-platform CLI for Feilian/CorpLink enterprise tenants, with Q
 - 支持系统 TUN、服务端路由、split/full 模式，以及额外域名和 CIDR 控制。
 - 支持纯用户态 SOCKS5，适合 Clash 按企业域名/IP 精确分流；不创建系统 TUN、路由或 DNS。
 - 一个 npm 主包覆盖 macOS arm64/x64、Linux arm64/x64 和 Windows x64，只安装当前平台二进制。
-- 首次运行交互生成 `~/feilian-cli.config.json`，后续可直接连接，并自动检查新版本。
+- 首次运行交互生成 `~/feilian-cli.config.json`；后续正常启动时发现新版本会自动通过 npm 安装，并直接启动新版。
 
 - Works with third-party Feilian/CorpLink enterprise tenants by discovering the service from the tenant identifier; no organization is hard-coded.
 - QR login by default, without typing the enterprise password into the terminal.
@@ -24,6 +24,7 @@ An unofficial cross-platform CLI for Feilian/CorpLink enterprise tenants, with Q
 - System TUN, server-provided routes, split/full modes, and additional domain/CIDR controls.
 - Userspace SOCKS5 for precise Clash routing without changing system interfaces, routes, or DNS.
 - Native npm packages for macOS, Linux, and Windows, with only the current platform binary installed.
+- Interactive first-run configuration, followed by automatic npm updates that start the newly installed CLI.
 
 ## npm 安装 / Install from npm
 
@@ -45,6 +46,10 @@ feilian-cli --version
 feilian-cli --check-update
 feilian-cli /path/to/config.json
 ```
+
+正常启动时若发现新版本，npm 启动器会自动安装并直接启动新版；检查或安装失败不会阻止当前版本运行。`--check-update` 只报告版本状态，不执行安装。
+
+On a normal start, the npm launcher installs an available update and starts the newly installed CLI. Check or installation failures do not prevent the current version from running. `--check-update` only reports version status and never installs anything.
 
 ## Clash 分流 / Clash split routing
 
@@ -417,6 +422,10 @@ graph TD;
 
 # Changelog
 
+- 1.0.2
+  - automatically install npm updates before starting the native CLI
+  - start the newly installed CLI after a successful update and keep the current version running if installation fails
+  - keep `--check-update` as a read-only version check
 - 1.0.1
   - route primary and backup VPN DNS servers through the WireGuard peer in SOCKS5/netstack mode
 - 1.0.0

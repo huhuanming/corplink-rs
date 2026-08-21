@@ -16,7 +16,7 @@ An unofficial cross-platform CLI for Feilian/CorpLink enterprise tenants. Enter 
 - **Clash 精确分流**：使用纯用户态 SOCKS5 模式，只把企业域名或 CIDR 交给飞连，其他流量继续使用原有 Clash 规则。
 - **标准 VPN 与精细路由**：支持 TUN、服务端下发路由、split/full 模式，以及额外域名、CIDR 白名单和排除路由。
 - **跨平台按需安装**：一个 npm 主包覆盖 macOS、Linux 和 Windows；npm 只下载当前系统对应的原生二进制。
-- **自动检查更新**：正常启动时进行非阻塞更新检查，也可随时手动检查。
+- **自动安装更新**：正常启动时发现新版本会通过 npm 自动安装并直接启动新版；检查或安装失败不影响当前版本运行。
 
 - **Third-party enterprise tenant login**: enter the Feilian identifier supplied by your organization and let the CLI discover the tenant service. No company, account, or private-network data is hard-coded in the package.
 - **QR-code login**: scan the terminal QR code with the official Feilian mobile app. No enterprise password needs to be typed into the terminal.
@@ -24,7 +24,7 @@ An unofficial cross-platform CLI for Feilian/CorpLink enterprise tenants. Enter 
 - **Precise Clash routing**: expose a userspace SOCKS5 endpoint and send only enterprise domains or CIDRs through Feilian while preserving existing Clash rules for everything else.
 - **VPN and detailed routing controls**: TUN mode, server-provided routes, split/full routing, additional domains and CIDRs, allowlists, and excluded routes.
 - **One package, native per-platform install**: macOS, Linux, and Windows are supported; npm installs only the binary for the current OS and CPU.
-- **Update checks**: a short non-fatal check runs on startup, with an explicit command available at any time.
+- **Automatic updates**: on a normal start, an available npm release is installed and the newly installed CLI is started. Check or installation failures do not block the current version.
 
 ## 支持的平台 / Supported platforms
 
@@ -181,6 +181,10 @@ Check for an update:
 ```sh
 feilian-cli --check-update
 ```
+
+该命令只报告版本状态，不会执行安装。正常启动 `feilian-cli` 时才会自动安装可用更新，并在成功后直接启动新版。
+
+This command only reports version status and never installs anything. Automatic installation runs only during a normal `feilian-cli` start, and starts the new version after a successful update.
 
 升级到最新版：
 
