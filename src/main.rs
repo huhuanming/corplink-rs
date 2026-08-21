@@ -374,11 +374,29 @@ async fn wait_for_shutdown_signal() {
 
 fn check_privilege() {
     #[cfg(unix)]
-    match sudo::escalate_if_needed() {
-        Ok(_) => {}
-        Err(_) => {
-            log::error!("please run as root");
-            exit(EPERM);
+    {
+        if unsafe { libc::geteuid() } != 0 {
+            #[cfg(target_os = "macos")]
+            eprintln!(
+                "Administrator permission is required to create the VPN interface and routes.\n\
+                 The following Password: prompt asks for this Mac's login/administrator password, not your Feilian password.\n\
+                 Password input is hidden; Feilian QR login starts after authorization."
+            );
+
+            #[cfg(not(target_os = "macos"))]
+            eprintln!(
+                "Administrator permission is required to create the VPN interface and routes.\n\
+                 The following Password: prompt asks for your system administrator password, not your Feilian password.\n\
+                 Password input is hidden; Feilian QR login starts after authorization."
+            );
+        }
+
+        match sudo::escalate_if_needed() {
+            Ok(_) => {}
+            Err(_) => {
+                log::error!("please run as root");
+                exit(EPERM);
+            }
         }
     }
 

@@ -481,7 +481,12 @@ impl Client {
             .unwrap_or_default();
         let vpn_token = if matches!(api, ApiName::ConnectVPN) {
             self.cookie_value_for_url(url, "vpn-token")?
-                .context("vpn-token cookie missing; required for connect request signing")?
+                .unwrap_or_else(|| {
+                    log::warn!(
+                        "VPN endpoint did not issue a vpn-token cookie; continuing with an empty signing field"
+                    );
+                    String::new()
+                })
         } else {
             String::new()
         };
@@ -2230,6 +2235,25 @@ mod tests {
                 .as_deref(),
             Some("test-token")
         );
+    }
+
+    #[test]
+    fn connect_signing_allows_a_missing_vpn_token() {
+        let client = test_client();
+        let endpoint = Url::parse("http://192.0.2.1/vpn/conn?os=Linux").unwrap();
+
+        let signature = client
+            .sign_request(
+                &ApiName::ConnectVPN,
+                "POST",
+                &endpoint,
+                Some(r#"{"public_key":"test","otp":""}"#),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(signature.as_deref().is_some_and(|value| value.starts_with("v1;")));
     }
 
     #[tokio::test]
