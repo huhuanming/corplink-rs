@@ -25,6 +25,7 @@ const URL_REQUEST_CODE_V1: &str = "{{url}}/api/v1/login/send?os={{os}}&os_versio
 const URL_VERIFY_CODE_V1: &str = "{{url}}/api/v1/login/verify?os={{os}}&os_version={{version}}";
 const URL_QR_TOKEN: &str = "{{url}}/api/login/token?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_AGREEMENT_SIGN: &str = "{{url}}/api/v2/agreement/sign?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
+const URL_SETTING: &str = "{{url}}/api/setting?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_VPN_MFA_TYPE: &str = "{{url}}/api/mfa/type?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_VPN_MFA_SEND: &str = "{{url}}/api/mfa/code/send?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_VPN_MFA_VERIFY: &str = "{{url}}/api/mfa/code/verify?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
@@ -58,6 +59,7 @@ pub enum ApiName {
     LoginQrToken,
     LoginQrCheck,
     AgreementSign,
+    Setting,
     VpnMfaType,
     VpnMfaSend,
     VpnMfaVerify,
@@ -267,6 +269,7 @@ impl ApiUrl {
         api_template.insert(ApiName::LoginEmailV1, Template::new(URL_VERIFY_CODE_V1));
         api_template.insert(ApiName::LoginQrToken, Template::new(URL_QR_TOKEN));
         api_template.insert(ApiName::AgreementSign, Template::new(URL_AGREEMENT_SIGN));
+        api_template.insert(ApiName::Setting, Template::new(URL_SETTING));
         api_template.insert(ApiName::VpnMfaType, Template::new(URL_VPN_MFA_TYPE));
         api_template.insert(ApiName::VpnMfaSend, Template::new(URL_VPN_MFA_SEND));
         api_template.insert(ApiName::VpnMfaVerify, Template::new(URL_VPN_MFA_VERIFY));
@@ -326,6 +329,7 @@ impl ApiUrl {
             ApiName::LoginMethod
             | ApiName::LoginQrToken
             | ApiName::AgreementSign
+            | ApiName::Setting
             | ApiName::VpnMfaType
             | ApiName::VpnMfaSend
             | ApiName::VpnMfaVerify
@@ -437,6 +441,24 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn setting_url_matches_official_bootstrap_path() {
+        let conf: Config = serde_json::from_value(json!({
+            "company_name": "test",
+            "username": "test",
+            "server": "https://vpn.example.com"
+        }))
+        .unwrap();
+
+        let api_url = ApiUrl::new(&conf).unwrap();
+        let url = api_url.get_api_url(&ApiName::Setting);
+
+        assert!(url.starts_with("https://vpn.example.com/api/setting?"));
+        assert!(url.contains("app_version=3.2.16"));
+        assert!(url.contains("client_source=FeiLian"));
+        assert!(url.contains("timestamp="));
+    }
 
     #[test]
     fn list_vpn_url_matches_official_platform_shape() {

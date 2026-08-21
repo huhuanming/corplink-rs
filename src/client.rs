@@ -135,11 +135,17 @@ where
                     .send(Message::Ping(Vec::new()))
                     .await
                     .context("failed to send VPN push WebSocket heartbeat")?;
+                log::info!("VPN push WebSocket ping sent");
                 heartbeat.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(10));
             }
             message = websocket.next() => {
                 match message {
                     Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => {
+                        log::info!(
+                            "received FeiLian WebSocket data frame: type={}, length={}",
+                            if matches!(&message, Message::Text(_)) { "text" } else { "binary" },
+                            message.len()
+                        );
                         let text = match message {
                             Message::Text(text) => text,
                             Message::Binary(bytes) => String::from_utf8(bytes)
@@ -168,10 +174,14 @@ where
                         let _ = events.send(event);
                     }
                     Some(Ok(Message::Ping(payload))) => {
+                        log::info!("received FeiLian WebSocket ping");
                         websocket
                             .send(Message::Pong(payload))
                             .await
                             .context("failed to reply to VPN push WebSocket ping")?;
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        log::info!("received FeiLian WebSocket pong");
                     }
                     Some(Ok(Message::Close(frame))) => {
                         bail!("VPN push WebSocket closed: {frame:?}");
@@ -517,6 +527,7 @@ pub struct Client {
     date_offset_sec: i32,
     vpn_push_events: Option<broadcast::Sender<WebSocketEvent>>,
     vpn_push_task: Option<JoinHandle<()>>,
+    vpn_push_cookie_fingerprint: Option<HashMap<String, Vec<u8>>>,
 }
 
 type VpnPushWebSocket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -574,6 +585,18 @@ impl VpnPushConnector {
 
     async fn connect(&self) -> Result<VpnPushWebSocket> {
         let request = self.build_request()?;
+        if let Some(cookie_header) = request.headers().get(websocket_header::COOKIE) {
+            let mut cookie_names = cookie_header
+                .to_str()
+                .context("invalid Cookie header for VPN push WebSocket")?
+                .split(';')
+                .map(str::trim)
+                .filter_map(|item| item.split_once('=').map(|(name, _)| name.to_string()))
+                .collect::<Vec<_>>();
+            cookie_names.sort();
+            cookie_names.dedup();
+            log::info!("VPN push WebSocket handshake cookies: {cookie_names:?}");
+        }
         let (websocket, response) = connect_async(request)
             .await
             .context("failed to connect VPN push WebSocket")?;
@@ -660,6 +683,22 @@ impl Client {
         ))
     }
 
+    fn websocket_device_cookie_header_for_config(conf: &Config) -> Result<String> {
+        let device_id = conf
+            .device_id
+            .as_deref()
+            .context("device_id missing in config")?;
+        let device_name = conf
+            .device_name
+            .as_deref()
+            .context("device_name missing in config")?;
+        Ok(format!(
+            "device_id={}; HttpOnly; Secure; device_name={}; HttpOnly; Secure",
+            Self::go_query_escape(device_id),
+            Self::go_query_escape(device_name)
+        ))
+    }
+
     pub fn new(conf: Config) -> Result<Client> {
         let f = conf.conf_file.clone().context("config file path missing")?;
         let interface_name = conf
@@ -730,6 +769,7 @@ impl Client {
             date_offset_sec: 0,
             vpn_push_events: None,
             vpn_push_task: None,
+            vpn_push_cookie_fingerprint: None,
         })
     }
 
@@ -813,6 +853,67 @@ impl Client {
             Some(self.custom_device_cookie_header()?),
             self.shared_cookie_header_for_url(url)?,
         )
+    }
+
+    fn cookie_fingerprint_from_header(
+        header: &header::HeaderValue,
+    ) -> Result<HashMap<String, Vec<u8>>> {
+        let mut fingerprint = HashMap::new();
+        for item in header
+            .to_str()
+            .context("invalid Cookie header")?
+            .split(';')
+            .map(str::trim)
+        {
+            let Some((name, value)) = item.split_once('=') else {
+                continue;
+            };
+            fingerprint.insert(
+                name.to_string(),
+                sha2::Sha256::digest(value.as_bytes()).to_vec(),
+            );
+        }
+        Ok(fingerprint)
+    }
+
+    fn cookie_fingerprint_for_url(&self, url: &Url) -> Result<HashMap<String, Vec<u8>>> {
+        let header = self
+            .cookie_header_for_url(url)?
+            .context("Cookie header missing")?;
+        Self::cookie_fingerprint_from_header(&header)
+    }
+
+    fn log_vpn_push_cookie_changes(&self, stage: &str) -> Result<()> {
+        let Some(previous) = self.vpn_push_cookie_fingerprint.as_ref() else {
+            return Ok(());
+        };
+        let current = self.cookie_fingerprint_for_url(&self.server_url()?)?;
+        let mut added = current
+            .keys()
+            .filter(|name| !previous.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut removed = previous
+            .keys()
+            .filter(|name| !current.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut changed = current
+            .iter()
+            .filter(|(name, value)| previous.get(*name).is_some_and(|old| old != *value))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        added.sort();
+        removed.sort();
+        changed.sort();
+        if added.is_empty() && removed.is_empty() && changed.is_empty() {
+            log::info!("VPN push WebSocket Cookie identity unchanged at {stage}");
+        } else {
+            log::warn!(
+                "VPN push WebSocket Cookie identity changed at {stage}: added={added:?}, removed={removed:?}, changed={changed:?}"
+            );
+        }
+        Ok(())
     }
 
     fn server_url(&self) -> Result<Url> {
@@ -1019,6 +1120,7 @@ impl Client {
         body: Option<Map<String, Value>>,
     ) -> Result<Resp<T>> {
         let sensitive_qr_request = matches!(&api, ApiName::LoginQrToken | ApiName::LoginQrCheck);
+        let sensitive_response = sensitive_qr_request || matches!(&api, ApiName::Setting);
         let parsed_url = Url::from_str(&url).with_context(|| format!("invalid url for {api:?}"))?;
         let body = body
             .map(|body| {
@@ -1078,8 +1180,17 @@ impl Client {
 
         self.parse_time_offset_from_date_header(&resp);
 
-        if resp.headers().contains_key(header::SET_COOKIE) {
-            log::info!("found set-cookie in header, saving cookie");
+        let mut set_cookie_names = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| value.split_once('=').map(|(name, _)| name.to_string()))
+            .collect::<Vec<_>>();
+        set_cookie_names.sort();
+        set_cookie_names.dedup();
+        if !set_cookie_names.is_empty() {
+            log::info!("api {api:?} updated cookies: {set_cookie_names:?}");
             self.save_cookie()?;
         }
         let text = resp
@@ -1114,7 +1225,7 @@ impl Client {
             data,
             action: raw.action,
         };
-        if sensitive_qr_request {
+        if sensitive_response {
             log::debug!("api {:#?} response code: {}", api, resp.code);
         } else {
             log::debug!("api {:#?} resp: {:#?}", api, resp);
@@ -1723,6 +1834,29 @@ impl Client {
         }
     }
 
+    async fn initialize_session_setting(&mut self) -> Result<()> {
+        log::info!("initializing FeiLian session settings");
+        let resp = self.request::<Value>(ApiName::Setting, None).await?;
+        match resp.code {
+            0 => {
+                log::info!("FeiLian session settings initialized");
+                Ok(())
+            }
+            101 | VPN_SESSION_MISSING_CODE => {
+                let msg = resp
+                    .message
+                    .unwrap_or_else(|| "logout required".to_string());
+                self.handle_logout_err(msg).await?;
+                unreachable!()
+            }
+            _ => bail!(format!(
+                "failed to initialize FeiLian session settings with error {}: {}",
+                resp.code,
+                resp.message.unwrap_or_default()
+            )),
+        }
+    }
+
     async fn get_first_vpn_by_latency(&self, vpn_info: Vec<RespVpnInfo>) -> Option<SelectedVpn> {
         let mut fastest: Option<(i64, usize, SelectedVpn)> = None;
 
@@ -1989,12 +2123,14 @@ impl Client {
         }
         self.stop_vpn_push_websocket();
 
+        let server_url = self.server_url()?;
+        let cookie_fingerprint = self.cookie_fingerprint_for_url(&server_url)?;
         let connector = VpnPushConnector {
             api_url: self.api_url.clone(),
             cookie: Arc::clone(&self.cookie),
-            server_url: self.server_url()?,
+            server_url,
             server_time_offset_sec: self.date_offset_sec,
-            device_cookie_header: Self::device_cookie_header_for_config(&self.conf)?,
+            device_cookie_header: Self::websocket_device_cookie_header_for_config(&self.conf)?,
         };
         let websocket = connector.connect().await?;
         let (events, _) = broadcast::channel(32);
@@ -2004,6 +2140,7 @@ impl Client {
         });
         self.vpn_push_events = Some(events);
         self.vpn_push_task = Some(task);
+        self.vpn_push_cookie_fingerprint = Some(cookie_fingerprint);
         Ok(())
     }
 
@@ -2012,6 +2149,7 @@ impl Client {
             task.abort();
         }
         self.vpn_push_events = None;
+        self.vpn_push_cookie_fingerprint = None;
     }
 
     async fn revoke_vpn_push(&mut self, message_id: &str) {
@@ -2041,6 +2179,7 @@ impl Client {
             .as_ref()
             .context("VPN push WebSocket is unavailable")?
             .subscribe();
+        self.log_vpn_push_cookie_changes("before VPN push request")?;
         let mut push = Map::new();
         push.insert("mfa_type".to_string(), json!("push"));
         push.insert("mfa_scene".to_string(), json!(VPN_MFA_SCENE));
@@ -2054,6 +2193,7 @@ impl Client {
                 sent.message.unwrap_or_default()
             );
         }
+        self.log_vpn_push_cookie_changes("after VPN push request")?;
         let message_id = sent
             .data
             .as_ref()
@@ -2157,6 +2297,7 @@ impl Client {
     }
 
     pub async fn connect_vpn(&mut self) -> Result<WgConf> {
+        self.initialize_session_setting().await?;
         let vpn_info = self.list_vpn().await?;
         if let Err(error) = self.start_vpn_push_websocket().await {
             log::warn!("FeiLian push WebSocket is unavailable: {error}");
@@ -2901,7 +3042,7 @@ mod tests {
             cookie: Arc::new(CookieStoreMutex::new(store)),
             server_url,
             server_time_offset_sec: 0,
-            device_cookie_header: Client::device_cookie_header_for_config(&conf).unwrap(),
+            device_cookie_header: Client::websocket_device_cookie_header_for_config(&conf).unwrap(),
         };
 
         let request = connector.build_request().unwrap();
@@ -2916,7 +3057,9 @@ mod tests {
         assert!(request.headers()[websocket_header::COOKIE]
             .to_str()
             .unwrap()
-            .starts_with("device_id=test-device; device_name=Test+Mac; session=test-session"));
+            .starts_with(
+                "device_id=test-device; HttpOnly; Secure; device_name=Test+Mac; HttpOnly; Secure; session=test-session"
+            ));
     }
 
     #[test]
