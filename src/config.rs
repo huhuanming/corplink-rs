@@ -3,15 +3,18 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use tokio::fs;
 
 use anyhow::{Context, Result};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::state::State;
 use crate::utils;
 
-const DEFAULT_DEVICE_NAME: &str = "DollarOS";
 #[cfg(target_os = "macos")]
 const DEFAULT_INTERFACE_NAME: &str = "utun12345";
 #[cfg(not(target_os = "macos"))]
@@ -43,6 +46,34 @@ pub const PLATFORM_AAD: &str = "aad";
 
 pub const STRATEGY_LATENCY: &str = "latency";
 pub const STRATEGY_DEFAULT: &str = "default";
+
+fn generate_device_id() -> String {
+    let mut bytes = [0_u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn official_device_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = Command::new("/usr/sbin/scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+        {
+            if output.status.success() {
+                let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !name.is_empty() {
+                    return name;
+                }
+            }
+        }
+    }
+
+    env::var("HOSTNAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "CorpLink".to_string())
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -149,15 +180,13 @@ impl Config {
             update_conf = true;
         }
         if conf.device_name.is_none() {
-            conf.device_name = Some(DEFAULT_DEVICE_NAME.to_string());
+            conf.device_name = Some(official_device_name());
+            conf.state = Some(State::Init);
             update_conf = true;
         }
         if conf.device_id.is_none() {
-            let device_name = conf
-                .device_name
-                .as_ref()
-                .context("device name missing when generating device id")?;
-            conf.device_id = Some(format!("{:x}", md5::compute(device_name)));
+            conf.device_id = Some(generate_device_id());
+            conf.state = Some(State::Init);
             update_conf = true;
         }
         match &conf.private_key {
@@ -251,6 +280,16 @@ pub fn create_config_if_missing(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn generated_device_ids_match_official_shape_and_are_unique() {
+        let first = generate_device_id();
+        let second = generate_device_id();
+
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
 
     #[test]
     fn default_config_template_is_valid() {

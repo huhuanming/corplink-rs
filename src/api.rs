@@ -113,10 +113,15 @@ pub struct ApiUrl {
 }
 
 fn unix_timestamp_seconds() -> String {
+    unix_timestamp_seconds_with_offset(0)
+}
+
+fn unix_timestamp_seconds_with_offset(offset_seconds: i32) -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default()
+        .saturating_add_signed(i64::from(offset_seconds))
         .to_string()
 }
 
@@ -311,6 +316,10 @@ impl ApiUrl {
     }
 
     pub fn get_api_url(&self, name: &ApiName) -> String {
+        self.get_api_url_with_offset(name, 0)
+    }
+
+    pub fn get_api_url_with_offset(&self, name: &ApiName, server_time_offset_sec: i32) -> String {
         let user_param = &self.user_param;
         let vpn_param = &self.vpn_param;
         match name {
@@ -323,7 +332,7 @@ impl ApiUrl {
             | ApiName::VpnMfaPush
             | ApiName::VpnMfaRevoke => {
                 let mut params = self.list_vpn_param.clone();
-                params.timestamp = unix_timestamp_seconds();
+                params.timestamp = unix_timestamp_seconds_with_offset(server_time_offset_sec);
                 self.api_template[name].render(&params)
             }
             ApiName::TpsLoginMethod => self.api_template[name].render(user_param),
@@ -338,7 +347,8 @@ impl ApiUrl {
             ApiName::LoginPasswordV1 => self.api_template[name].render(user_param),
             ApiName::ListVPN => {
                 let mut list_vpn_param = self.list_vpn_param.clone();
-                list_vpn_param.timestamp = unix_timestamp_seconds();
+                list_vpn_param.timestamp =
+                    unix_timestamp_seconds_with_offset(server_time_offset_sec);
                 self.api_template[name].render(&list_vpn_param)
             }
             ApiName::Otp => self.api_template[name].render(user_param),
@@ -347,7 +357,7 @@ impl ApiUrl {
             ApiName::PingVPN | ApiName::ConnectVPN => {
                 let mut param = self.list_vpn_param.clone();
                 param.url = self.vpn_param.url.clone();
-                param.timestamp = unix_timestamp_seconds();
+                param.timestamp = unix_timestamp_seconds_with_offset(server_time_offset_sec);
                 self.api_template[name].render(&param)
             }
             ApiName::KeepAliveVPN => self.api_template[name].render(vpn_param),
@@ -356,6 +366,14 @@ impl ApiUrl {
     }
 
     pub fn get_qr_check_url(&self, token: &str) -> Result<String> {
+        self.get_qr_check_url_with_offset(token, 0)
+    }
+
+    pub fn get_qr_check_url_with_offset(
+        &self,
+        token: &str,
+        server_time_offset_sec: i32,
+    ) -> Result<String> {
         let mut url =
             Url::parse(&self.user_param.url).context("invalid server URL for QR login")?;
         url.set_path("/api/login/token/check");
@@ -372,13 +390,16 @@ impl ApiUrl {
             .append_pair("os_release", &params.os_release)
             .append_pair("os_version", &params.version)
             .append_pair("soc", &params.soc)
-            .append_pair("timestamp", &unix_timestamp_seconds())
+            .append_pair(
+                "timestamp",
+                &unix_timestamp_seconds_with_offset(server_time_offset_sec),
+            )
             .append_pair("token", token)
             .append_pair("login_scene", "feilian");
         Ok(url.into())
     }
 
-    pub fn get_websocket_url(&self) -> Result<String> {
+    pub fn get_websocket_url(&self, server_time_offset_sec: i32) -> Result<String> {
         let mut url = Url::parse(&self.user_param.url)
             .context("invalid server URL for push confirmation WebSocket")?;
         let websocket_scheme = match url.scheme() {
@@ -393,17 +414,20 @@ impl ApiUrl {
 
         let params = &self.list_vpn_param;
         url.query_pairs_mut()
-            .append_pair("os", &params.os)
-            .append_pair("model", &params.model)
-            .append_pair("brand", &params.brand)
-            .append_pair("client_source", &params.client_source)
             .append_pair("app_version", &params.app_version)
+            .append_pair("brand", &params.brand)
             .append_pair("build_number", &params.build_number)
-            .append_pair("os_version", &params.version)
-            .append_pair("os_release", &params.os_release)
-            .append_pair("soc", &params.soc)
+            .append_pair("client_source", &params.client_source)
             .append_pair("language", &params.language)
-            .append_pair("timestamp", &unix_timestamp_seconds());
+            .append_pair("model", &params.model)
+            .append_pair("os", &params.os)
+            .append_pair("os_release", &params.os_release)
+            .append_pair("os_version", &params.version)
+            .append_pair("soc", &params.soc)
+            .append_pair(
+                "timestamp",
+                &unix_timestamp_seconds_with_offset(server_time_offset_sec),
+            );
         Ok(url.into())
     }
 }
@@ -569,12 +593,30 @@ mod tests {
         }))
         .unwrap();
         let api_url = ApiUrl::new(&conf).unwrap();
-        let url = Url::parse(&api_url.get_websocket_url().unwrap()).unwrap();
+        let url = Url::parse(&api_url.get_websocket_url(0).unwrap()).unwrap();
 
         assert_eq!(url.scheme(), "wss");
         assert_eq!(url.host_str(), Some("vpn.example.com"));
         assert_eq!(url.port(), Some(10443));
         assert_eq!(url.path(), "/api/ws/socket");
+        assert_eq!(
+            url.query_pairs()
+                .map(|(key, _)| key.into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "app_version",
+                "brand",
+                "build_number",
+                "client_source",
+                "language",
+                "model",
+                "os",
+                "os_release",
+                "os_version",
+                "soc",
+                "timestamp",
+            ]
+        );
         let query = url.query_pairs().collect::<HashMap<_, _>>();
         for key in [
             "os",
