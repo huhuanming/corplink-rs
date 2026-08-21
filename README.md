@@ -417,6 +417,8 @@ graph TD;
 
 # Changelog
 
+- 1.0.1
+  - route primary and backup VPN DNS servers through the WireGuard peer in SOCKS5/netstack mode
 - 1.0.0
   - publish `feilian-cli` through npm with native per-platform packages
   - add interactive enterprise setup and user-home configuration

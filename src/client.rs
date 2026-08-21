@@ -371,6 +371,45 @@ fn merge_additional_routes(
     routes
 }
 
+fn netstack_dns_config(
+    primary: &str,
+    backup: &str,
+    has_ipv6_address: bool,
+) -> (String, Vec<String>) {
+    let mut servers = Vec::new();
+    let mut routes = Vec::new();
+    for configured in [primary, backup] {
+        for value in configured.split(',') {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            let Ok(ip) = value.parse::<IpAddr>() else {
+                log::warn!("ignoring invalid VPN DNS server: {:?}", value);
+                continue;
+            };
+            if ip.is_ipv6() && !has_ipv6_address {
+                log::info!(
+                    "ignoring VPN IPv6 DNS server {:?} because the server did not assign an IPv6 address",
+                    value
+                );
+                continue;
+            }
+            let server = ip.to_string();
+            if servers.contains(&server) {
+                continue;
+            }
+            let route = match ip {
+                IpAddr::V4(_) => format!("{ip}/32"),
+                IpAddr::V6(_) => format!("{ip}/128"),
+            };
+            servers.push(server);
+            routes.push(route);
+        }
+    }
+    (servers.join(","), routes)
+}
+
 async fn resolve_additional_domains(domains: &[String], has_ipv6_address: bool) -> Vec<String> {
     let mut routes = Vec::new();
     for configured_domain in domains {
@@ -2393,7 +2432,8 @@ impl Client {
         log::info!("try to get wg conf from remote");
         let (wg_info, public_key, private_key) = self.fetch_peer_info().await?;
         let mtu = wg_info.setting.vpn_mtu;
-        let dns = wg_info.setting.vpn_dns;
+        let primary_dns = wg_info.setting.vpn_dns;
+        let backup_dns = wg_info.setting.vpn_dns_backup;
         let peer_key = wg_info.public_key;
         let ip_mask = wg_info.ip_mask.parse::<u32>().context("invalid ip mask")?;
         let address = format!("{}/{}", wg_info.ip, ip_mask);
@@ -2449,7 +2489,24 @@ impl Client {
             }
         };
 
+        let netstack_mode = self.conf.socks5_listen.is_some();
+        let (dns, netstack_dns_routes) = if netstack_mode {
+            let (servers, routes) =
+                netstack_dns_config(&primary_dns, &backup_dns, has_ipv6_address);
+            if servers.is_empty() {
+                bail!("VPN server returned no usable DNS servers for SOCKS5/netstack mode");
+            }
+            log::info!(
+                "SOCKS5/netstack DNS configured with {} server(s)",
+                routes.len()
+            );
+            (servers, routes)
+        } else {
+            (primary_dns, Vec::new())
+        };
+
         let mut additional_routes = self.conf.vpn_additional_routes.clone().unwrap_or_default();
+        additional_routes.extend(netstack_dns_routes);
         if let Some(domains) = self.conf.vpn_additional_domains.as_deref() {
             additional_routes.extend(resolve_additional_domains(domains, has_ipv6_address).await);
         }
@@ -2685,11 +2742,11 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::{
-        encode_sign_header, hkdf_sha256, merge_additional_routes, normalize_mac_address,
-        parse_websocket_event, pump_vpn_push_websocket, resolve_additional_domains,
-        select_supported_vpn_mfa_type, value_after_keyword, vpn_connect_body, vpn_push_result,
-        wait_for_vpn_push_confirmation, websocket_header, Client, ReqwestCookieStore,
-        VpnPushConnector, WebSocketEvent,
+        encode_sign_header, hkdf_sha256, merge_additional_routes, netstack_dns_config,
+        normalize_mac_address, parse_websocket_event, pump_vpn_push_websocket,
+        resolve_additional_domains, select_supported_vpn_mfa_type, value_after_keyword,
+        vpn_connect_body, vpn_push_result, wait_for_vpn_push_confirmation, websocket_header,
+        Client, ReqwestCookieStore, VpnPushConnector, WebSocketEvent,
     };
     use crate::api::{ApiName, ApiUrl};
     use crate::config::{Config, RouteMode};
@@ -3299,6 +3356,23 @@ mod tests {
         let routes = merge_additional_routes(Vec::new(), &["2001:db8::/32".to_string()], true);
 
         assert_eq!(routes, vec!["2001:db8::/32"]);
+    }
+
+    #[test]
+    fn netstack_dns_uses_primary_and_backup_with_host_routes() {
+        let (servers, routes) = netstack_dns_config("8.8.8.8", "10.20.0.53", false);
+
+        assert_eq!(servers, "8.8.8.8,10.20.0.53");
+        assert_eq!(routes, vec!["8.8.8.8/32", "10.20.0.53/32"]);
+    }
+
+    #[test]
+    fn netstack_dns_deduplicates_and_skips_unusable_ipv6() {
+        let (servers, routes) =
+            netstack_dns_config("8.8.8.8,2001:4860:4860::8888", "8.8.8.8", false);
+
+        assert_eq!(servers, "8.8.8.8");
+        assert_eq!(routes, vec!["8.8.8.8/32"]);
     }
 
     #[test]
