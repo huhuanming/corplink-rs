@@ -656,53 +656,6 @@ impl Client {
         Ok(resp)
     }
 
-    async fn request_form<T: DeserializeOwned + fmt::Debug>(
-        &mut self,
-        api: ApiName,
-        form: &[(&str, &str)],
-    ) -> Result<Resp<T>> {
-        let url = self.api_url.get_api_url(&api);
-        let parsed_url = Url::from_str(&url).with_context(|| format!("invalid url for {api:?}"))?;
-        let cookie_header = self.cookie_header_for_url(&parsed_url)?;
-        let csrf_token = self.csrf_token_for_url(&parsed_url)?;
-        let jwt_token = self.jwt_token_for_url(&parsed_url)?;
-        let mut request = self.c.post(url).form(form);
-        if let Some(cookie_header) = cookie_header {
-            request = request.header(header::COOKIE, cookie_header);
-        }
-        if let Some(csrf_token) = csrf_token {
-            request = request.header("csrf-token", csrf_token);
-        }
-        if let Some(jwt_token) = jwt_token {
-            request = request.header("jwt-token", jwt_token);
-        }
-
-        let response = request
-            .send()
-            .await
-            .with_context(|| format!("request {api:?} failed"))?;
-        if !response.status().is_success() {
-            let message = format!("logout because of bad resp code: {}", response.status());
-            self.handle_logout_err(message).await?;
-        }
-        self.parse_time_offset_from_date_header(&response);
-        let set_cookie_headers = response
-            .headers()
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        if !set_cookie_headers.is_empty() {
-            self.store_vpn_token_from_headers(&set_cookie_headers, &parsed_url)?;
-            log::info!("found set-cookie in header, saving cookie");
-            self.save_cookie()?;
-        }
-        response
-            .json::<Resp<T>>()
-            .await
-            .with_context(|| format!("failed to parse response for api {api:?}"))
-    }
-
     fn parse_time_offset_from_date_header(&mut self, resp: &Response) {
         let headers = resp.headers();
         if let Some(date) = headers.get("date") {
@@ -1621,14 +1574,14 @@ impl Client {
                         .chain(methods.types.iter())
                         .collect::<Vec<_>>()
                 )
-            })?;
+        })?;
 
         if code_type == "push" {
+            let mut push = Map::new();
+            push.insert("mfa_type".to_string(), json!("push"));
+            push.insert("mfa_scene".to_string(), json!(VPN_MFA_SCENE));
             let sent = self
-                .request_form::<Map<String, Value>>(
-                    ApiName::VpnMfaPush,
-                    &[("mfa_type", "push"), ("mfa_scene", VPN_MFA_SCENE)],
-                )
+                .request::<Map<String, Value>>(ApiName::VpnMfaPush, Some(push))
                 .await?;
             if sent.code != 0 {
                 bail!(
