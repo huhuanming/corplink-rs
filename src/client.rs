@@ -438,7 +438,6 @@ impl Client {
     fn signing_input_params(api: &ApiName) -> Option<u64> {
         match api {
             ApiName::ListVPN => Some(510),
-            ApiName::ConnectVPN => Some(542),
             _ => None,
         }
     }
@@ -479,18 +478,6 @@ impl Client {
             .filter(|body| !body.is_empty())
             .map(|body| sha2::Sha256::digest(body.as_bytes()).to_vec())
             .unwrap_or_default();
-        let vpn_token = if matches!(api, ApiName::ConnectVPN) {
-            self.cookie_value_for_url(url, "vpn-token")?
-                .unwrap_or_else(|| {
-                    log::warn!(
-                        "VPN endpoint did not issue a vpn-token cookie; continuing with an empty signing field"
-                    );
-                    String::new()
-                })
-        } else {
-            String::new()
-        };
-
         let fields: [&[u8]; 10] = [
             b"",
             method.as_bytes(),
@@ -501,7 +488,7 @@ impl Client {
             b"",
             csrf.as_bytes(),
             b"",
-            vpn_token.as_bytes(),
+            b"",
         ];
 
         let mut canonical = Vec::new();
@@ -2238,9 +2225,9 @@ mod tests {
     }
 
     #[test]
-    fn connect_signing_allows_a_missing_vpn_token() {
+    fn legacy_connect_request_does_not_require_signing() {
         let client = test_client();
-        let endpoint = Url::parse("http://192.0.2.1/vpn/conn?os=Linux").unwrap();
+        let endpoint = Url::parse("http://192.0.2.1/vpn/conn?os=Android&os_version=2").unwrap();
 
         let signature = client
             .sign_request(
@@ -2253,7 +2240,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(signature.as_deref().is_some_and(|value| value.starts_with("v1;")));
+        assert!(signature.is_none());
     }
 
     #[tokio::test]
