@@ -7,6 +7,7 @@ mod resp;
 mod state;
 mod template;
 mod totp;
+mod update;
 mod utils;
 mod wg;
 
@@ -17,6 +18,8 @@ use is_elevated;
 use dns::DNSManager;
 
 use std::env;
+use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::exit;
 
 use anyhow::{anyhow, Context, Result};
@@ -24,35 +27,86 @@ use anyhow::{anyhow, Context, Result};
 use client::Client;
 use config::{Config, WgConf};
 
-fn print_usage_and_exit(name: &str, conf: &str) {
-    println!("usage:\n\t{} {}", name, conf);
-    exit(1);
+enum Command {
+    Run {
+        config_path: PathBuf,
+        create_default: bool,
+    },
+    CheckUpdate,
+    Help,
+    Version,
 }
 
-fn parse_arg() -> String {
-    let mut conf_file = String::from("config.json");
+fn print_usage(name: &str) {
+    let default_config = config::default_config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| format!("~/{}", config::DEFAULT_CONFIG_FILE_NAME));
+    println!(
+        "usage:\n\t{name}\n\t{name} <config-path>\n\t{name} --check-update\n\t{name} --version\n\nDefault config:\n\t{default_config}"
+    );
+}
+
+fn parse_arg() -> Result<(String, Command)> {
     let mut args = env::args();
-    // pop name
-    let name = args.next().unwrap();
+    let name = args.next().unwrap_or_else(|| String::from("feilian-cli"));
     match args.len() {
-        0 => {}
+        0 => Ok((
+            name,
+            Command::Run {
+                config_path: config::default_config_path()?,
+                create_default: true,
+            },
+        )),
         1 => {
-            // pop arg
             let arg = args.next().unwrap();
             match arg.as_str() {
-                "-h" | "--help" => {
-                    print_usage_and_exit(&name, &conf_file);
-                }
-                _ => {
-                    conf_file = arg;
-                }
+                "-h" | "--help" => Ok((name, Command::Help)),
+                "-V" | "--version" => Ok((name, Command::Version)),
+                "--check-update" => Ok((name, Command::CheckUpdate)),
+                _ => Ok((
+                    name,
+                    Command::Run {
+                        config_path: PathBuf::from(arg),
+                        create_default: false,
+                    },
+                )),
             }
         }
-        _ => {
-            print_usage_and_exit(&name, &conf_file);
-        }
+        _ => Err(anyhow!("too many command-line arguments")),
     }
-    conf_file
+}
+
+fn prompt(label: &str, required: bool) -> Result<String> {
+    loop {
+        print!("{label}");
+        io::stdout().flush().context("failed to flush stdout")?;
+
+        let mut value = String::new();
+        let read = io::stdin()
+            .read_line(&mut value)
+            .context("failed to read input")?;
+        if read == 0 {
+            return Err(anyhow!("input closed while initializing config"));
+        }
+
+        let value = value.trim().to_string();
+        if !required || !value.is_empty() {
+            return Ok(value);
+        }
+        println!("This value is required.");
+    }
+}
+
+fn initialize_default_config(path: &std::path::Path) -> Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+
+    println!("First-time feilian-cli setup");
+    let company_name = prompt("Feilian company identifier: ", true)?;
+    let username = prompt("Enterprise account/email (optional): ", false)?;
+
+    config::create_config_if_missing(path, &company_name, &username, config::PLATFORM_CORPLINK_QR)
 }
 
 pub const EPERM: i32 = 1;
@@ -72,9 +126,43 @@ async fn run() -> Result<()> {
     //  because `check_privilege` will call sudo and drop env if you're not root
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    let (name, command) = parse_arg()?;
+    let (config_path, create_default) = match command {
+        Command::Help => {
+            print_usage(&name);
+            return Ok(());
+        }
+        Command::Version => {
+            println!("feilian-cli {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Command::CheckUpdate => {
+            let status = update::check()
+                .await
+                .context("failed to check for updates")?;
+            update::report(&status);
+            return Ok(());
+        }
+        Command::Run {
+            config_path,
+            create_default,
+        } => (config_path, create_default),
+    };
+
+    if create_default && initialize_default_config(&config_path)? {
+        println!("saved config: {}", config_path.display());
+        println!("starting Feilian connection...");
+    }
+
+    match update::check().await {
+        Ok(status @ update::UpdateStatus::Available { .. }) => update::report(&status),
+        Ok(update::UpdateStatus::Current { .. }) => {}
+        Err(error) => log::debug!("automatic update check failed: {error:#}"),
+    }
+
     print_version();
 
-    let conf_file = parse_arg();
+    let conf_file = config_path.display().to_string();
     let mut conf = Config::from_file(&conf_file)
         .await
         .context("failed to load config")?;

@@ -1,6 +1,6 @@
 {
   "name": "feilian-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Unofficial community CLI for Feilian/CorpLink with email, QR, VPN MFA, and SOCKS5 netstack support.",
   "license": "GPL-2.0-or-later",
   "repository": {
@@ -17,17 +17,24 @@
     "socks5"
   ],
   "bin": {
-    "feilian-cli": "bin/feilian-cli"
+    "feilian-cli": "bin/feilian-cli.js"
   },
-  "os": [
-    "darwin"
-  ],
-  "cpu": [
-    "arm64"
-  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "feilian-cli-darwin-arm64": "0.2.0",
+    "feilian-cli-darwin-x64": "0.2.0",
+    "feilian-cli-linux-arm64": "0.2.0",
+    "feilian-cli-linux-x64": "0.2.0",
+    "feilian-cli-win32-x64": "0.2.0"
+  },
   "files": [
-    "bin/feilian-cli",
+    "bin/feilian-cli.js",
     "README.md",
     "license.txt"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

@@ -25,3 +25,4 @@ libwg/libwg.h
 # generated npm release payload
 /npm/feilian-cli/bin/feilian-cli
 /npm/feilian-cli/license.txt
+/.npm-release/

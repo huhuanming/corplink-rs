@@ -4,12 +4,16 @@
 
 > 本仓库为非官方社区 fork，与飞连官方无隶属或背书关系。
 
-## npm（macOS Apple Silicon）
+## npm
 
 ```bash
 npm install --global feilian-cli
-feilian-cli /path/to/config.json
+feilian-cli
 ```
+
+首次运行会交互式询问企业标识和可选的账号/邮箱，将结果写入用户主目录的 `feilian-cli.config.json`，随后直接开始连接。登录方式固定为二维码，VPN 二次验证优先使用飞连客户端推送；仍可通过 `feilian-cli /path/to/config.json` 指定其他配置。`feilian-cli --check-update` 可主动检查更新，正常启动时也会进行一次短暂且不影响连接的更新检查。
+
+npm 主包会根据系统仅安装一个原生二进制包，支持 macOS arm64/x64、Linux arm64/x64 和 Windows x64。
 
 # 安装
 
@@ -128,7 +132,7 @@ $env:RUST_LOG="debug"; .\corplink-rs.exe config.json
 
 ## macos 特殊说明
 
-macos 要求 tun 设备的名称满足正则表达式 `utun[0-9]*` ，因此需要将配置文件中的 `interface_name` 改为符合正则的名字，例如 `utun12345`  
+macos 要求 tun 设备的名称满足正则表达式 `utun[0-9]*`。npm CLI 新建的配置会自动使用 `utun12345`；旧配置如有需要，可将 `interface_name` 改为符合正则的名字。
 另外， `utun` 后的数字类型应该是 `int16` ，如果大于 `32767` 会报错 `Failed to create TUN device: invalid argument` 。具体参考 [#46](https://github.com/PinkD/corplink-rs/issues/46)
 
 ## log level 配置

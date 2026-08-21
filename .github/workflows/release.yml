@@ -1,146 +1,166 @@
-name: release
+name: release-feilian-cli
 
 on:
+  workflow_dispatch:
   push:
-    branches:
-      - master
     tags:
-      - "test-release"
-      - "[0-9]+\\.[0-9]+"
+      - "feilian-cli-v*"
+
+permissions:
+  contents: read
 
 jobs:
-  create-release:
-    name: create-release
-    runs-on: ubuntu-latest
+  build-unix:
+    name: build-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+            asset: feilian-cli-darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+            asset: feilian-cli-darwin-x64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+            asset: feilian-cli-linux-arm64
+          - runner: ubuntu-24.04
+            target: linux-x64
+            asset: feilian-cli-linux-x64
+    runs-on: ${{ matrix.runner }}
     steps:
-      - name: create release
-        uses: actions/create-release@v1
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+      - name: Checkout source
+        uses: actions/checkout@v6
         with:
-          tag_name: ${{ github.ref }}
-          release_name: ${{ github.ref }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-archlinux:
-    name: build-archlinux
-    needs: ["create-release"]
-    runs-on: ubuntu-latest
-    steps:
-      - name: checkout code
-        uses: actions/checkout@v4
-      - name: build package
-        id: build_package
-        uses: PinkD/arch-pkgbuild-builder@v2.4
-        with:
-          target: "pkgbuild"
-          pkgname: "pack"
-      - name: upload package to artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: archlinux-package
-          path: pack/corplink-rs-*.pkg.tar.zst
-      - name: upload package to release
-        uses: svenstaro/upload-release-action@v2
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: pack/corplink-rs-${{ github.ref_name }}*.pkg.tar.zst
-          tag: ${{ github.ref }}
-          overwrite: true
-          file_glob: true
-      - name: create tarball
-        run: |
-          cp pack/pkg/corplink-rs/usr/bin/corplink-rs .
-          cp config/config.json .
-          tar -czf corplink-rs-${{ github.ref_name }}-linux-$(uname -m).tar.gz corplink-rs config.json
-      - name: upload tarball to artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: linux-tarball
-          path: corplink-rs-${{ github.ref_name }}*.tar.gz
-      - name: upload tarball to release
-        uses: svenstaro/upload-release-action@v2
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: corplink-rs-${{ github.ref_name }}*.tar.gz
-          tag: ${{ github.ref }}
-          overwrite: true
-          file_glob: true
-
-  build-macos:
-    name: build-macos
-    needs: ["create-release"]
-    runs-on: macos-latest
-    steps:
-      - name: checkout code
-        uses: actions/checkout@v4
-      - name: setup go
-        uses: actions/setup-go@v5
+          submodules: recursive
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
           go-version: ">=1.22.0"
-      - name: build libwg
-        run: cd libwg && ./build.sh
-      - name: build package
-        run: cargo build --release
-      - name: build tarball
+      - name: Build WireGuard library
+        working-directory: libwg
+        run: ./build.sh
+      - name: Build native CLI
+        run: cargo build --release --locked
+        env:
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/usr/src/corplink-rs"
+      - name: Prepare artifact
         run: |
-          cd target
-          cp release/corplink-rs .
-          cp ../config/config.json .
-          tar -czf corplink-rs-${{ github.ref_name }}-macos-$(uname -m).tar.gz corplink-rs config.json
-      - name: upload package to artifact
+          mkdir -p release/native
+          cp target/release/corplink-rs "release/native/${{ matrix.asset }}"
+          chmod 755 "release/native/${{ matrix.asset }}"
+      - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: macos-tarball
-          path: target/corplink-rs-*.tar.gz
-      - name: upload package to release
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/corplink-rs-*.tar.gz
-          tag: ${{ github.ref }}
-          overwrite: true
-          file_glob: true
+          name: ${{ matrix.asset }}
+          path: release/native/${{ matrix.asset }}
+          if-no-files-found: error
 
   build-windows:
-    name: build-windows
-    needs: ["create-release"]
-    runs-on: windows-latest
+    name: build-win32-x64
+    runs-on: windows-2025
     steps:
-      - name: checkout code
-        uses: actions/checkout@v4
-      - name: setup go
-        uses: actions/setup-go@v5
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
           go-version: ">=1.22.0"
-      - name: build libwg
-        run: cd libwg && ./build.ps1
-      - name: rust install gnu toolchain
-        run: rustup toolchain install stable-gnu
-      - name: rust use gnu toolchain
-        run: rustup default stable-x86_64-pc-windows-gnu
-      - name: build package
-        run: cargo build --release
-      - name: build check result
+      - name: Use Rust GNU toolchain
+        shell: pwsh
         run: |
-          Move-Item -Path "target/release/corplink-rs.exe" -Destination "."
-          Move-Item -Path "config/config.json" -Destination "."
-          Copy-Item -Path "scripts/setup.ps1" -Destination "."
-          Compress-Archive -Path corplink-rs.exe,config.json,setup.ps1 -Destination corplink-rs-${{ github.ref_name }}-windows.zip
-      - name: upload package to artifact
+          rustup toolchain install stable-x86_64-pc-windows-gnu
+          rustup default stable-x86_64-pc-windows-gnu
+      - name: Build WireGuard library
+        working-directory: libwg
+        shell: pwsh
+        run: ./build.ps1
+      - name: Build native CLI
+        shell: pwsh
+        run: cargo build --release --locked
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release/native | Out-Null
+          Copy-Item target/release/corplink-rs.exe release/native/feilian-cli-win32-x64.exe
+      - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: windows-zip
-          path: corplink-rs-${{ github.ref_name }}-windows.zip
-      - name: upload package to release
-        uses: svenstaro/upload-release-action@v2
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+          name: feilian-cli-win32-x64
+          path: release/native/feilian-cli-win32-x64.exe
+          if-no-files-found: error
+
+  publish:
+    name: publish-release
+    if: startsWith(github.ref, 'refs/tags/feilian-cli-v')
+    needs: [build-unix, build-windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: corplink-rs-${{ github.ref_name }}-windows.zip
-          tag: ${{ github.ref }}
-          overwrite: true
-          file_glob: true
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Download native binaries
+        uses: actions/download-artifact@v6
+        with:
+          pattern: feilian-cli-*
+          path: release/native
+          merge-multiple: true
+      - name: Verify release version
+        shell: bash
+        run: |
+          expected_version="${GITHUB_REF_NAME#feilian-cli-v}"
+          package_version="$(node -p "require('./npm/feilian-cli/package.json').version")"
+          test "$expected_version" = "$package_version"
+      - name: Prepare npm packages
+        run: |
+          node npm/scripts/prepare-platform-packages.mjs release/native .npm-release
+          cp license.txt npm/feilian-cli/license.txt
+      - name: Validate npm packages
+        shell: bash
+        run: |
+          for package_dir in .npm-release/* npm/feilian-cli; do
+            (cd "$package_dir" && npm pack --dry-run)
+          done
+      - name: Publish platform packages
+        shell: bash
+        run: |
+          for package_dir in .npm-release/*; do
+            package_name="$(node -p "require('./$package_dir/package.json').name")"
+            package_version="$(node -p "require('./$package_dir/package.json').version")"
+            if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+              echo "$package_name@$package_version is already published; skipping"
+            else
+              (cd "$package_dir" && npm publish --access public)
+            fi
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish main package
+        working-directory: npm/feilian-cli
+        shell: bash
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+            echo "$package_name@$package_version is already published; skipping"
+          else
+            npm publish --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Create GitHub release
+        shell: bash
+        run: gh release create "$GITHUB_REF_NAME" release/native/* --generate-notes --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}

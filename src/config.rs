@@ -1,4 +1,8 @@
+use std::env;
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
 use anyhow::{Context, Result};
@@ -8,7 +12,11 @@ use crate::state::State;
 use crate::utils;
 
 const DEFAULT_DEVICE_NAME: &str = "DollarOS";
+#[cfg(target_os = "macos")]
+const DEFAULT_INTERFACE_NAME: &str = "utun12345";
+#[cfg(not(target_os = "macos"))]
 const DEFAULT_INTERFACE_NAME: &str = "corplink";
+pub const DEFAULT_CONFIG_FILE_NAME: &str = "feilian-cli.config.json";
 
 pub const PLATFORM_LDAP: &str = "ldap";
 pub const PLATFORM_CORPLINK: &str = "feilian";
@@ -187,6 +195,115 @@ impl Config {
             .await
             .with_context(|| format!("failed to write config file {file}"))?;
         Ok(())
+    }
+}
+
+pub fn default_config_path() -> Result<PathBuf> {
+    #[cfg(windows)]
+    let home = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME"));
+    #[cfg(not(windows))]
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"));
+    let home = home.context("failed to locate the user home directory")?;
+    Ok(PathBuf::from(home).join(DEFAULT_CONFIG_FILE_NAME))
+}
+
+/// Creates a user configuration without overwriting an existing file.
+/// Returns true only when a new file was created.
+pub fn create_config_if_missing(
+    path: &Path,
+    company_name: &str,
+    username: &str,
+    platform: &str,
+) -> Result<bool> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    match options.open(path) {
+        Ok(mut file) => {
+            let data = serde_json::to_string_pretty(&serde_json::json!({
+                "company_name": company_name,
+                "username": username,
+                "password": null,
+                "platform": platform,
+                "vpn_mfa_type": "push",
+                "auto_setup_routes": true,
+                "route_mode": "split",
+                "use_vpn_dns": false
+            }))?;
+            file.write_all(format!("{data}\n").as_bytes())
+                .with_context(|| format!("failed to write config file {}", path.display()))?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to create config file {}", path.display()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn default_config_template_is_valid() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = env::temp_dir().join(format!("feilian-cli-template-{unique}.json"));
+
+        assert!(create_config_if_missing(
+            &path,
+            "example-company",
+            "user@example.com",
+            PLATFORM_CORPLINK_QR,
+        )
+        .unwrap());
+        let config: Config =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(config.company_name, "example-company");
+        assert_eq!(config.username, "user@example.com");
+        assert_eq!(config.platform.as_deref(), Some(PLATFORM_CORPLINK_QR));
+        assert_eq!(config.vpn_mfa_type.as_deref(), Some("push"));
+        assert_eq!(config.route_mode, Some(RouteMode::Split));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn default_config_creation_never_overwrites() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = env::temp_dir().join(format!("feilian-cli-{unique}.json"));
+
+        assert!(create_config_if_missing(
+            &path,
+            "first-company",
+            "first@example.com",
+            PLATFORM_CORPLINK_QR,
+        )
+        .unwrap());
+        let original = std::fs::read_to_string(&path).unwrap();
+        assert!(!create_config_if_missing(
+            &path,
+            "second-company",
+            "second@example.com",
+            PLATFORM_CORPLINK_EMAIL,
+        )
+        .unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        std::fs::remove_file(path).unwrap();
     }
 }
 
