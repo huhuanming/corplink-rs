@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -9,10 +11,10 @@ use crate::config::Config;
 use crate::template::Template;
 
 pub const URL_GET_COMPANY: &str = "https://corplink.volcengine.cn/api/match";
-pub(crate) const CORPLINK_APP_VERSION: &str = "3.3.17";
-pub(crate) const CORPLINK_BUILD_NUMBER: &str = "8135";
+pub(crate) const CORPLINK_APP_VERSION: &str = "3.2.16";
+pub(crate) const CORPLINK_BUILD_NUMBER: &str = "12116";
 
-const URL_GET_LOGIN_METHOD: &str = "{{url}}/api/login/setting?os={{os}}&os_version={{version}}";
+const URL_GET_LOGIN_METHOD: &str = "{{url}}/api/login/setting?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_GET_TPS_LOGIN_METHOD: &str = "{{url}}/api/tpslogin/link?os={{os}}&os_version={{version}}";
 const URL_GET_TPS_TOKEN_CHECK: &str =
     "{{url}}/api/tpslogin/token/check?os={{os}}&os_version={{version}}";
@@ -21,10 +23,11 @@ const URL_REQUEST_CODE: &str = "{{url}}/api/login/code/send?os={{os}}&os_version
 const URL_VERIFY_CODE: &str = "{{url}}/api/login/code/verify?os={{os}}&os_version={{version}}";
 const URL_REQUEST_CODE_V1: &str = "{{url}}/api/v1/login/send?os={{os}}&os_version={{version}}";
 const URL_VERIFY_CODE_V1: &str = "{{url}}/api/v1/login/verify?os={{os}}&os_version={{version}}";
-const URL_QR_TOKEN: &str = "{{url}}/api/login/token";
-const URL_VPN_MFA_TYPE: &str = "{{url}}/api/mfa/type";
-const URL_VPN_MFA_SEND: &str = "{{url}}/api/mfa/code/send";
-const URL_VPN_MFA_VERIFY: &str = "{{url}}/api/mfa/code/verify";
+const URL_QR_TOKEN: &str = "{{url}}/api/login/token?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
+const URL_AGREEMENT_SIGN: &str = "{{url}}/api/v2/agreement/sign?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
+const URL_VPN_MFA_TYPE: &str = "{{url}}/api/mfa/type?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
+const URL_VPN_MFA_SEND: &str = "{{url}}/api/mfa/code/send?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
+const URL_VPN_MFA_VERIFY: &str = "{{url}}/api/mfa/code/verify?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_VPN_MFA_PUSH: &str = "{{url}}/api/v1/mfa/send?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_VPN_MFA_REVOKE: &str = "{{url}}/api/v1/mfa/revoke?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_LOGIN_PASSWORD: &str = "{{url}}/api/login?os={{os}}&os_version={{version}}";
@@ -32,7 +35,7 @@ const URL_LOGIN_PASSWORD_V1: &str =
     "{{url}}/api/v1/login?os={{os}}&os_version={{version}}&client_source=FeiLian";
 const URL_LIST_VPN: &str = "{{url}}/api/vpn/list?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 
-const URL_PING_VPN_HOST: &str = "{{url}}/vpn/ping?os={{os}}&os_version={{version}}";
+const URL_PING_VPN_HOST: &str = "{{url}}/vpn/ping?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_FETCH_PEER_INFO: &str = "{{url}}/vpn/conn?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_OPERATE_VPN: &str = "{{url}}/vpn/report?os={{os}}&os_version={{version}}";
 const URL_OTP: &str = "{{url}}/api/v2/p/otp?os={{os}}&os_version={{version}}";
@@ -54,6 +57,7 @@ pub enum ApiName {
     LoginEmailV1,
     LoginQrToken,
     LoginQrCheck,
+    AgreementSign,
     VpnMfaType,
     VpnMfaSend,
     VpnMfaVerify,
@@ -116,42 +120,107 @@ fn unix_timestamp_seconds() -> String {
         .to_string()
 }
 
+#[cfg(target_os = "macos")]
+fn command_output(program: &str, args: &[&str]) -> String {
+    Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+#[derive(Clone)]
+struct SystemParameters {
+    brand: String,
+    language: String,
+    model: String,
+    os: String,
+    os_release: String,
+    os_version: String,
+    soc: String,
+}
+
+fn system_parameters() -> SystemParameters {
+    #[cfg(target_os = "macos")]
+    {
+        return SystemParameters {
+            brand: "Apple".to_string(),
+            language: "zh".to_string(),
+            model: command_output("/usr/sbin/sysctl", &["-n", "hw.model"]),
+            os: "Mac".to_string(),
+            os_release: String::new(),
+            os_version: command_output("/usr/bin/sw_vers", &["-productVersion"]),
+            soc: command_output("/usr/sbin/sysctl", &["-n", "machdep.cpu.brand_string"]),
+        };
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return SystemParameters {
+            brand: String::new(),
+            language: "en".to_string(),
+            model: String::new(),
+            os: "Linux".to_string(),
+            os_release: linux_os_release(),
+            os_version: linux_os_version(),
+            soc: cpu_soc(),
+        };
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    SystemParameters {
+        brand: String::new(),
+        language: "en".to_string(),
+        model: String::new(),
+        os: std::env::consts::OS.to_string(),
+        os_release: std::env::consts::OS.to_string(),
+        os_version: std::env::consts::OS.to_string(),
+        soc: cpu_soc(),
+    }
+}
+
+pub(crate) fn corplink_user_agent() -> String {
+    let system = system_parameters();
+    let goos = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        std::env::consts::OS
+    };
+    format!(
+        "CorpLink/{} ({}; {} {}; {})",
+        CORPLINK_APP_VERSION, goos, system.os, system.os_release, system.language
+    )
+}
+
+#[cfg(target_os = "linux")]
 fn linux_os_release() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(release) = std::fs::read_to_string("/etc/os-release") {
-            for line in release.lines() {
-                if let Some(value) = line.strip_prefix("ID=") {
-                    return value.trim_matches('"').to_string();
-                }
+    if let Ok(release) = std::fs::read_to_string("/etc/os-release") {
+        for line in release.lines() {
+            if let Some(value) = line.strip_prefix("ID=") {
+                return value.trim_matches('"').to_string();
             }
         }
-        "linux".to_string()
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::env::consts::OS.to_string()
-    }
+    "linux".to_string()
 }
 
+#[cfg(target_os = "linux")]
 fn linux_os_version() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(release) = std::fs::read_to_string("/etc/os-release") {
-            for line in release.lines() {
-                if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
-                    return value.trim_matches('"').to_string();
-                }
+    if let Ok(release) = std::fs::read_to_string("/etc/os-release") {
+        for line in release.lines() {
+            if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
+                return value.trim_matches('"').to_string();
             }
         }
-        "Linux".to_string()
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::env::consts::OS.to_string()
-    }
+    "Linux".to_string()
 }
 
+#[cfg(not(target_os = "macos"))]
 fn cpu_soc() -> String {
     match std::env::consts::ARCH {
         "aarch64" => "aarch64".to_string(),
@@ -164,6 +233,7 @@ impl ApiUrl {
     pub fn new(conf: &Config) -> Result<ApiUrl> {
         let os = "Android".to_string();
         let version = "2".to_string();
+        let system = system_parameters();
         let server_url = conf
             .server
             .clone()
@@ -191,14 +261,12 @@ impl ApiUrl {
         api_template.insert(ApiName::LoginEmail, Template::new(URL_VERIFY_CODE));
         api_template.insert(ApiName::LoginEmailV1, Template::new(URL_VERIFY_CODE_V1));
         api_template.insert(ApiName::LoginQrToken, Template::new(URL_QR_TOKEN));
+        api_template.insert(ApiName::AgreementSign, Template::new(URL_AGREEMENT_SIGN));
         api_template.insert(ApiName::VpnMfaType, Template::new(URL_VPN_MFA_TYPE));
         api_template.insert(ApiName::VpnMfaSend, Template::new(URL_VPN_MFA_SEND));
         api_template.insert(ApiName::VpnMfaVerify, Template::new(URL_VPN_MFA_VERIFY));
         api_template.insert(ApiName::VpnMfaPush, Template::new(URL_VPN_MFA_PUSH));
-        api_template.insert(
-            ApiName::VpnMfaRevoke,
-            Template::new(URL_VPN_MFA_REVOKE),
-        );
+        api_template.insert(ApiName::VpnMfaRevoke, Template::new(URL_VPN_MFA_REVOKE));
         api_template.insert(ApiName::LoginPassword, Template::new(URL_LOGIN_PASSWORD));
         api_template.insert(
             ApiName::LoginPasswordV1,
@@ -222,15 +290,15 @@ impl ApiUrl {
             list_vpn_param: ListVpnUrlParam {
                 url: server_url,
                 app_version: CORPLINK_APP_VERSION.to_string(),
-                brand: "".to_string(),
+                brand: system.brand,
                 build_number: CORPLINK_BUILD_NUMBER.to_string(),
                 client_source: "FeiLian".to_string(),
-                language: "en".to_string(),
-                model: "".to_string(),
-                os: "Linux".to_string(),
-                os_release: linux_os_release(),
-                version: linux_os_version(),
-                soc: cpu_soc(),
+                language: system.language,
+                model: system.model,
+                os: system.os,
+                os_release: system.os_release,
+                version: system.os_version,
+                soc: system.soc,
                 timestamp: unix_timestamp_seconds(),
             },
             vpn_param: VpnUrlParam {
@@ -246,7 +314,18 @@ impl ApiUrl {
         let user_param = &self.user_param;
         let vpn_param = &self.vpn_param;
         match name {
-            ApiName::LoginMethod => self.api_template[name].render(user_param),
+            ApiName::LoginMethod
+            | ApiName::LoginQrToken
+            | ApiName::AgreementSign
+            | ApiName::VpnMfaType
+            | ApiName::VpnMfaSend
+            | ApiName::VpnMfaVerify
+            | ApiName::VpnMfaPush
+            | ApiName::VpnMfaRevoke => {
+                let mut params = self.list_vpn_param.clone();
+                params.timestamp = unix_timestamp_seconds();
+                self.api_template[name].render(&params)
+            }
             ApiName::TpsLoginMethod => self.api_template[name].render(user_param),
             ApiName::TpsTokenCheck => self.api_template[name].render(user_param),
             ApiName::CorplinkLoginMethod => self.api_template[name].render(user_param),
@@ -254,16 +333,7 @@ impl ApiUrl {
             ApiName::RequestEmailCodeV1 => self.api_template[name].render(user_param),
             ApiName::LoginEmail => self.api_template[name].render(user_param),
             ApiName::LoginEmailV1 => self.api_template[name].render(user_param),
-            ApiName::LoginQrToken => self.api_template[name].render(user_param),
             ApiName::LoginQrCheck => unreachable!("QR check URL requires a token"),
-            ApiName::VpnMfaType => self.api_template[name].render(user_param),
-            ApiName::VpnMfaSend => self.api_template[name].render(user_param),
-            ApiName::VpnMfaVerify => self.api_template[name].render(user_param),
-            ApiName::VpnMfaPush | ApiName::VpnMfaRevoke => {
-                let mut push_param = self.list_vpn_param.clone();
-                push_param.timestamp = unix_timestamp_seconds();
-                self.api_template[name].render(&push_param)
-            }
             ApiName::LoginPassword => self.api_template[name].render(user_param),
             ApiName::LoginPasswordV1 => self.api_template[name].render(user_param),
             ApiName::ListVPN => {
@@ -274,8 +344,7 @@ impl ApiUrl {
             ApiName::Otp => self.api_template[name].render(user_param),
             ApiName::Logout => self.api_template[name].render(user_param),
 
-            ApiName::PingVPN => self.api_template[name].render(vpn_param),
-            ApiName::ConnectVPN => {
+            ApiName::PingVPN | ApiName::ConnectVPN => {
                 let mut param = self.list_vpn_param.clone();
                 param.url = self.vpn_param.url.clone();
                 param.timestamp = unix_timestamp_seconds();
@@ -291,9 +360,50 @@ impl ApiUrl {
             Url::parse(&self.user_param.url).context("invalid server URL for QR login")?;
         url.set_path("/api/login/token/check");
         url.set_query(None);
+        let params = &self.list_vpn_param;
         url.query_pairs_mut()
+            .append_pair("app_version", &params.app_version)
+            .append_pair("brand", &params.brand)
+            .append_pair("build_number", &params.build_number)
+            .append_pair("client_source", &params.client_source)
+            .append_pair("language", &params.language)
+            .append_pair("model", &params.model)
+            .append_pair("os", &params.os)
+            .append_pair("os_release", &params.os_release)
+            .append_pair("os_version", &params.version)
+            .append_pair("soc", &params.soc)
+            .append_pair("timestamp", &unix_timestamp_seconds())
             .append_pair("token", token)
             .append_pair("login_scene", "feilian");
+        Ok(url.into())
+    }
+
+    pub fn get_websocket_url(&self) -> Result<String> {
+        let mut url = Url::parse(&self.user_param.url)
+            .context("invalid server URL for push confirmation WebSocket")?;
+        let websocket_scheme = match url.scheme() {
+            "https" => "wss",
+            "http" => "ws",
+            scheme => anyhow::bail!("unsupported WebSocket base URL scheme: {scheme}"),
+        };
+        url.set_scheme(websocket_scheme)
+            .map_err(|_| anyhow::anyhow!("failed to set WebSocket URL scheme"))?;
+        url.set_path("/api/ws/socket");
+        url.set_query(None);
+
+        let params = &self.list_vpn_param;
+        url.query_pairs_mut()
+            .append_pair("os", &params.os)
+            .append_pair("model", &params.model)
+            .append_pair("brand", &params.brand)
+            .append_pair("client_source", &params.client_source)
+            .append_pair("app_version", &params.app_version)
+            .append_pair("build_number", &params.build_number)
+            .append_pair("os_version", &params.version)
+            .append_pair("os_release", &params.os_release)
+            .append_pair("soc", &params.soc)
+            .append_pair("language", &params.language)
+            .append_pair("timestamp", &unix_timestamp_seconds());
         Ok(url.into())
     }
 }
@@ -305,7 +415,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_vpn_url_matches_official_linux_shape() {
+    fn list_vpn_url_matches_official_platform_shape() {
         let conf: Config = serde_json::from_value(json!({
             "company_name": "test",
             "username": "test",
@@ -317,15 +427,15 @@ mod tests {
         let url = api_url.get_api_url(&ApiName::ListVPN);
 
         assert!(url.starts_with("https://vpn.example.com/api/vpn/list?"));
-        assert!(url.contains("app_version=3.3.17"));
-        assert!(url.contains("build_number=8135"));
+        assert!(url.contains("app_version=3.2.16"));
+        assert!(url.contains("build_number=12116"));
         assert!(url.contains("client_source=FeiLian"));
-        assert!(url.contains("os=Linux"));
+        assert!(url.contains(&format!("os={}", system_parameters().os)));
         assert!(url.contains("timestamp="));
     }
 
     #[test]
-    fn connect_vpn_url_matches_official_linux_shape() {
+    fn connect_vpn_url_matches_official_platform_shape() {
         let conf: Config = serde_json::from_value(json!({
             "company_name": "test",
             "username": "test",
@@ -338,10 +448,10 @@ mod tests {
         let url = api_url.get_api_url(&ApiName::ConnectVPN);
 
         assert!(url.starts_with("https://vpn-node.example.com/vpn/conn?"));
-        assert!(url.contains("app_version=3.3.17"));
-        assert!(url.contains("build_number=8135"));
+        assert!(url.contains("app_version=3.2.16"));
+        assert!(url.contains("build_number=12116"));
         assert!(url.contains("client_source=FeiLian"));
-        assert!(url.contains("os=Linux"));
+        assert!(url.contains(&format!("os={}", system_parameters().os)));
         assert!(url.contains("timestamp="));
     }
 
@@ -356,9 +466,16 @@ mod tests {
         let mut api_url = ApiUrl::new(&conf).unwrap();
         api_url.vpn_param.url = "http://192.0.2.1:80".to_string();
 
+        let url = Url::parse(&api_url.get_api_url(&ApiName::ConnectVPN)).unwrap();
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host_str(), Some("192.0.2.1"));
+        assert_eq!(url.port_or_known_default(), Some(80));
+        assert_eq!(url.path(), "/vpn/conn");
         assert_eq!(
-            api_url.get_api_url(&ApiName::ConnectVPN),
-            "http://192.0.2.1:80/vpn/conn?os=Android&os_version=2"
+            url.query_pairs()
+                .find(|(key, _)| key == "os")
+                .map(|(_, value)| value.into_owned()),
+            Some(system_parameters().os)
         );
     }
 
@@ -394,14 +511,21 @@ mod tests {
 
         let api_url = ApiUrl::new(&conf).unwrap();
 
+        let token_url = Url::parse(&api_url.get_api_url(&ApiName::LoginQrToken)).unwrap();
+        assert_eq!(token_url.path(), "/api/login/token");
+        assert!(token_url.query_pairs().any(|(key, _)| key == "timestamp"));
+        let check_url = Url::parse(&api_url.get_qr_check_url("a+b&c").unwrap()).unwrap();
+        assert_eq!(check_url.path(), "/api/login/token/check");
+        let query = check_url.query_pairs().collect::<HashMap<_, _>>();
         assert_eq!(
-            api_url.get_api_url(&ApiName::LoginQrToken),
-            "https://vpn.example.com/api/login/token"
+            query.get("token").map(|value| value.as_ref()),
+            Some("a+b&c")
         );
         assert_eq!(
-            api_url.get_qr_check_url("a+b&c").unwrap(),
-            "https://vpn.example.com/api/login/token/check?token=a%2Bb%26c&login_scene=feilian"
+            query.get("login_scene").map(|value| value.as_ref()),
+            Some("feilian")
         );
+        assert!(query.contains_key("timestamp"));
     }
 
     #[test]
@@ -415,29 +539,58 @@ mod tests {
 
         let api_url = ApiUrl::new(&conf).unwrap();
 
-        assert_eq!(
-            api_url.get_api_url(&ApiName::VpnMfaType),
-            "https://vpn.example.com/api/mfa/type"
-        );
-        assert_eq!(
-            api_url.get_api_url(&ApiName::VpnMfaSend),
-            "https://vpn.example.com/api/mfa/code/send"
-        );
-        assert_eq!(
-            api_url.get_api_url(&ApiName::VpnMfaVerify),
-            "https://vpn.example.com/api/mfa/code/verify"
-        );
+        assert!(api_url
+            .get_api_url(&ApiName::VpnMfaType)
+            .starts_with("https://vpn.example.com/api/mfa/type?app_version=3.2.16"));
+        assert!(api_url
+            .get_api_url(&ApiName::VpnMfaSend)
+            .starts_with("https://vpn.example.com/api/mfa/code/send?app_version=3.2.16"));
+        assert!(api_url
+            .get_api_url(&ApiName::VpnMfaVerify)
+            .starts_with("https://vpn.example.com/api/mfa/code/verify?app_version=3.2.16"));
         let push_url = api_url.get_api_url(&ApiName::VpnMfaPush);
-        assert!(push_url.starts_with(
-            "https://vpn.example.com/api/v1/mfa/send?app_version=3.3.17&brand=&build_number=8135&client_source=FeiLian&language=en&model=&os=Linux&os_release="
-        ));
+        assert!(push_url.starts_with("https://vpn.example.com/api/v1/mfa/send?app_version=3.2.16"));
         assert!(push_url.contains("&os_version="));
         assert!(push_url.contains("&soc="));
         assert!(push_url.contains("&timestamp="));
         let revoke_url = api_url.get_api_url(&ApiName::VpnMfaRevoke);
-        assert!(revoke_url.starts_with(
-            "https://vpn.example.com/api/v1/mfa/revoke?app_version=3.3.17&brand=&build_number=8135&client_source=FeiLian&language=en&model=&os=Linux&os_release="
-        ));
+        assert!(
+            revoke_url.starts_with("https://vpn.example.com/api/v1/mfa/revoke?app_version=3.2.16")
+        );
         assert!(revoke_url.contains("&timestamp="));
+    }
+
+    #[test]
+    fn websocket_url_matches_official_shape() {
+        let conf: Config = serde_json::from_value(json!({
+            "company_name": "test",
+            "username": "test",
+            "server": "https://vpn.example.com:10443/base"
+        }))
+        .unwrap();
+        let api_url = ApiUrl::new(&conf).unwrap();
+        let url = Url::parse(&api_url.get_websocket_url().unwrap()).unwrap();
+
+        assert_eq!(url.scheme(), "wss");
+        assert_eq!(url.host_str(), Some("vpn.example.com"));
+        assert_eq!(url.port(), Some(10443));
+        assert_eq!(url.path(), "/api/ws/socket");
+        let query = url.query_pairs().collect::<HashMap<_, _>>();
+        for key in [
+            "os",
+            "model",
+            "brand",
+            "client_source",
+            "app_version",
+            "build_number",
+            "os_version",
+            "os_release",
+            "soc",
+            "language",
+            "timestamp",
+        ] {
+            assert!(query.contains_key(key), "missing query parameter {key}");
+        }
+        assert!(!query.contains_key("device_id"));
     }
 }
