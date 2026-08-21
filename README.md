@@ -37,6 +37,33 @@ npm install --global feilian-cli@latest
 - Route only enterprise domains and private CIDRs through Feilian while keeping existing proxy rules for other traffic.
 - Install the native binary for the current platform through npm and update it automatically on later starts.
 
+## AI 友好：把 README 丢给 AI / AI-friendly setup
+
+> **不想读后面的文档？完全可以。** 把这个 README 链接发给 ChatGPT、Claude、Codex 或其他你信任的 AI 助手，告诉它你的操作系统和目标，让 AI 帮你完成安装、二维码登录、SOCKS5 配置和 Clash/Mihomo 分流。
+>
+> **Do not want to read the rest? You do not have to.** Give this README URL to ChatGPT, Claude, Codex, or another trusted AI assistant. Tell it your operating system and goal, then let it guide the installation, QR login, SOCKS5 setup, and Clash/Mihomo routing.
+
+```text
+https://github.com/huhuanming/corplink-rs#readme
+```
+
+可直接复制的提示词 / Copyable prompt:
+
+```text
+请阅读 https://github.com/huhuanming/corplink-rs#readme。
+我的系统是 macOS/Linux/Windows。请帮我安装 feilian-cli，使用二维码登录，
+并根据我的企业域名和 CIDR 生成 Clash/Mihomo 分流配置。每一步执行前先解释用途。
+
+Read https://github.com/huhuanming/corplink-rs#readme.
+I use macOS/Linux/Windows. Help me install feilian-cli, sign in with the QR code,
+and generate Clash/Mihomo routing rules for my enterprise domains and CIDRs.
+Explain each command before running it.
+```
+
+只向 AI 提供完成配置所需的最少信息。不要发送企业密码、Token、Cookie、动态验证码、证书或私钥。
+
+Share only the minimum configuration context. Never send enterprise passwords, tokens, cookies, one-time codes, certificates, or private keys to an AI assistant.
+
 ## 安装 / Install
 
 需要 Node.js 16 或更高版本。
