@@ -32,7 +32,7 @@ const URL_LOGIN_PASSWORD_V1: &str =
 const URL_LIST_VPN: &str = "{{url}}/api/vpn/list?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 
 const URL_PING_VPN_HOST: &str = "{{url}}/vpn/ping?os={{os}}&os_version={{version}}";
-const URL_FETCH_PEER_INFO: &str = "{{url}}/vpn/conn?os={{os}}&os_version={{version}}";
+const URL_FETCH_PEER_INFO: &str = "{{url}}/vpn/conn?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_OPERATE_VPN: &str = "{{url}}/vpn/report?os={{os}}&os_version={{version}}";
 const URL_OTP: &str = "{{url}}/api/v2/p/otp?os={{os}}&os_version={{version}}";
 // log out the current terminal so it frees the server-side session/terminal
@@ -265,7 +265,12 @@ impl ApiUrl {
             ApiName::Logout => self.api_template[name].render(user_param),
 
             ApiName::PingVPN => self.api_template[name].render(vpn_param),
-            ApiName::ConnectVPN => self.api_template[name].render(vpn_param),
+            ApiName::ConnectVPN => {
+                let mut param = self.list_vpn_param.clone();
+                param.url = self.vpn_param.url.clone();
+                param.timestamp = unix_timestamp_seconds();
+                self.api_template[name].render(&param)
+            }
             ApiName::KeepAliveVPN => self.api_template[name].render(vpn_param),
             ApiName::DisconnectVPN => self.api_template[name].render(vpn_param),
         }
@@ -302,6 +307,27 @@ mod tests {
         let url = api_url.get_api_url(&ApiName::ListVPN);
 
         assert!(url.starts_with("https://vpn.example.com/api/vpn/list?"));
+        assert!(url.contains("app_version=3.3.17"));
+        assert!(url.contains("build_number=8135"));
+        assert!(url.contains("client_source=FeiLian"));
+        assert!(url.contains("os=Linux"));
+        assert!(url.contains("timestamp="));
+    }
+
+    #[test]
+    fn connect_vpn_url_matches_official_linux_shape() {
+        let conf: Config = serde_json::from_value(json!({
+            "company_name": "test",
+            "username": "test",
+            "server": "https://vpn.example.com"
+        }))
+        .unwrap();
+
+        let mut api_url = ApiUrl::new(&conf).unwrap();
+        api_url.vpn_param.url = "https://vpn-node.example.com".to_string();
+        let url = api_url.get_api_url(&ApiName::ConnectVPN);
+
+        assert!(url.starts_with("https://vpn-node.example.com/vpn/conn?"));
         assert!(url.contains("app_version=3.3.17"));
         assert!(url.contains("build_number=8135"));
         assert!(url.contains("client_source=FeiLian"));

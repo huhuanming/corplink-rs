@@ -422,6 +422,18 @@ impl Client {
             })
     }
 
+    fn jwt_token_for_url(&self, url: &Url) -> Result<Option<header::HeaderValue>> {
+        self.cookie_value_for_url(url, "vpn-token")
+            .and_then(|value| {
+                value
+                    .map(|value| {
+                        header::HeaderValue::from_str(&value)
+                            .context("invalid vpn-token header value")
+                    })
+                    .transpose()
+            })
+    }
+
     fn cookie_value_for_url(&self, url: &Url, name: &str) -> Result<Option<String>> {
         let cookie_store = self
             .cookie
@@ -438,6 +450,7 @@ impl Client {
     fn signing_input_params(api: &ApiName) -> Option<u64> {
         match api {
             ApiName::ListVPN => Some(510),
+            ApiName::ConnectVPN => Some(542),
             _ => None,
         }
     }
@@ -450,6 +463,7 @@ impl Client {
         body: Option<&str>,
         cookie_header: Option<&header::HeaderValue>,
         csrf_token: Option<&header::HeaderValue>,
+        jwt_token: Option<&header::HeaderValue>,
     ) -> Result<Option<String>> {
         let Some(signing_input_params) = Self::signing_input_params(api) else {
             return Ok(None);
@@ -478,6 +492,17 @@ impl Client {
             .filter(|body| !body.is_empty())
             .map(|body| sha2::Sha256::digest(body.as_bytes()).to_vec())
             .unwrap_or_default();
+        let jwt = jwt_token
+            .map(|value| {
+                value
+                    .to_str()
+                    .context("invalid jwt-token header for signing")
+            })
+            .transpose()?
+            .unwrap_or("");
+        if matches!(api, ApiName::ConnectVPN) && jwt.is_empty() {
+            bail!("vpn-token cookie missing; required for VPN connection");
+        }
         let fields: [&[u8]; 10] = [
             b"",
             method.as_bytes(),
@@ -488,7 +513,7 @@ impl Client {
             b"",
             csrf.as_bytes(),
             b"",
-            b"",
+            jwt.as_bytes(),
         ];
 
         let mut canonical = Vec::new();
@@ -531,6 +556,7 @@ impl Client {
         let method = if body.is_some() { "POST" } else { "GET" };
         let cookie_header = self.cookie_header_for_url(&parsed_url)?;
         let csrf_token = self.csrf_token_for_url(&parsed_url)?;
+        let jwt_token = self.jwt_token_for_url(&parsed_url)?;
         let sign_header = self.sign_request(
             &api,
             method,
@@ -538,6 +564,7 @@ impl Client {
             body.as_deref(),
             cookie_header.as_ref(),
             csrf_token.as_ref(),
+            jwt_token.as_ref(),
         )?;
 
         let mut rb = match body {
@@ -553,6 +580,9 @@ impl Client {
         }
         if let Some(csrf_token) = csrf_token {
             rb = rb.header("csrf-token", csrf_token);
+        }
+        if let Some(jwt_token) = jwt_token {
+            rb = rb.header("jwt-token", jwt_token);
         }
         if let Some(sign_header) = sign_header {
             rb = rb.header("sign", sign_header);
@@ -575,12 +605,16 @@ impl Client {
 
         self.parse_time_offset_from_date_header(&resp);
 
-        for (name, _) in resp.headers() {
-            if name.as_str().eq_ignore_ascii_case("set-cookie") {
-                log::info!("found set-cookie in header, saving cookie");
-                self.save_cookie()?;
-                break;
-            }
+        let set_cookie_headers = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !set_cookie_headers.is_empty() {
+            self.store_vpn_token_from_headers(&set_cookie_headers, &parsed_url)?;
+            log::info!("found set-cookie in header, saving cookie");
+            self.save_cookie()?;
         }
         let text = resp
             .text()
@@ -631,12 +665,16 @@ impl Client {
         let parsed_url = Url::from_str(&url).with_context(|| format!("invalid url for {api:?}"))?;
         let cookie_header = self.cookie_header_for_url(&parsed_url)?;
         let csrf_token = self.csrf_token_for_url(&parsed_url)?;
+        let jwt_token = self.jwt_token_for_url(&parsed_url)?;
         let mut request = self.c.post(url).form(form);
         if let Some(cookie_header) = cookie_header {
             request = request.header(header::COOKIE, cookie_header);
         }
         if let Some(csrf_token) = csrf_token {
             request = request.header("csrf-token", csrf_token);
+        }
+        if let Some(jwt_token) = jwt_token {
+            request = request.header("jwt-token", jwt_token);
         }
 
         let response = request
@@ -648,7 +686,14 @@ impl Client {
             self.handle_logout_err(message).await?;
         }
         self.parse_time_offset_from_date_header(&response);
-        if response.headers().contains_key(header::SET_COOKIE) {
+        let set_cookie_headers = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !set_cookie_headers.is_empty() {
+            self.store_vpn_token_from_headers(&set_cookie_headers, &parsed_url)?;
             log::info!("found set-cookie in header, saving cookie");
             self.save_cookie()?;
         }
@@ -1405,18 +1450,22 @@ impl Client {
     ) -> Result<()> {
         ReqwestCookieStore::set_cookies(self.cookie.as_ref(), &mut headers.iter(), endpoint_url);
 
-        if self
-            .cookie_value_for_url(endpoint_url, "vpn-token")?
-            .is_some()
-        {
+        self.store_vpn_token_from_headers(headers, endpoint_url)?;
+        Ok(())
+    }
+
+    fn store_vpn_token_from_headers(
+        &self,
+        headers: &[header::HeaderValue],
+        url: &Url,
+    ) -> Result<()> {
+        if self.cookie_value_for_url(url, "vpn-token")?.is_some() {
             return Ok(());
         }
 
-        // Some current deployments expose the probe on HTTP while returning a
-        // Secure vpn-token cookie. A browser cookie store correctly rejects that
-        // combination, but the native client still uses the token to sign the
-        // subsequent request to this same authenticated endpoint. Recover only
-        // this explicitly required cookie and do not relax handling for others.
+        // Native FeiLian keeps vpn-token from Set-Cookie in a shared session jar.
+        // Recover this one cookie when standards-based storage rejects attributes
+        // such as Secure on an HTTP VPN probe; do not relax handling for others.
         for header in headers {
             let Ok(value) = header.to_str() else {
                 continue;
@@ -1429,15 +1478,15 @@ impl Client {
             }
             let endpoint_cookie = Cookie::try_from_raw_cookie(
                 &RawCookie::new("vpn-token", raw_cookie.value().to_string()),
-                endpoint_url,
+                url,
             )
-            .context("failed to bind vpn-token to selected VPN endpoint")?;
+            .context("failed to bind vpn-token to response URL")?;
             self.cookie
                 .lock()
                 .map_err(|e| anyhow!("failed to lock cookie store: {e}"))?
-                .insert(endpoint_cookie, endpoint_url)
-                .context("failed to store vpn-token for selected VPN endpoint")?;
-            log::info!("stored vpn-token from selected VPN probe response");
+                .insert(endpoint_cookie, url)
+                .context("failed to store vpn-token from response")?;
+            log::info!("stored vpn-token from server response");
             break;
         }
         Ok(())
@@ -2225,9 +2274,36 @@ mod tests {
     }
 
     #[test]
-    fn legacy_connect_request_does_not_require_signing() {
+    fn connect_request_requires_vpn_token_for_signing() {
         let client = test_client();
         let endpoint = Url::parse("http://192.0.2.1/vpn/conn?os=Android&os_version=2").unwrap();
+
+        let error = client
+            .sign_request(
+                &ApiName::ConnectVPN,
+                "POST",
+                &endpoint,
+                Some(r#"{"public_key":"test","otp":""}"#),
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("vpn-token cookie missing"));
+    }
+
+    #[test]
+    fn vpn_token_is_used_as_jwt_header_and_connect_signature_input() {
+        let client = test_client();
+        let endpoint = Url::parse("http://192.0.2.1/vpn/conn?os=Android&os_version=2").unwrap();
+        let headers = vec![header::HeaderValue::from_static(
+            "vpn-token=test-token; Secure; HttpOnly; Path=/",
+        )];
+        client.store_vpn_token_from_headers(&headers, &endpoint).unwrap();
+
+        let jwt_token = client.jwt_token_for_url(&endpoint).unwrap().unwrap();
+        assert_eq!(jwt_token, "test-token");
 
         let signature = client
             .sign_request(
@@ -2237,10 +2313,11 @@ mod tests {
                 Some(r#"{"public_key":"test","otp":""}"#),
                 None,
                 None,
+                Some(&jwt_token),
             )
             .unwrap();
 
-        assert!(signature.is_none());
+        assert!(signature.is_some_and(|value| value.starts_with("v1;")));
     }
 
     #[tokio::test]
