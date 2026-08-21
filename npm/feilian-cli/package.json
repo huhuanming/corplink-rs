@@ -27,7 +27,7 @@
     "feilian-cli-darwin-x64": "0.2.0",
     "feilian-cli-linux-arm64": "0.2.0",
     "feilian-cli-linux-x64": "0.2.0",
-    "feilian-cli-win32-x64": "0.2.0"
+    "feilian-cli-windows-x64": "0.2.0"
   },
   "files": [
     "bin/feilian-cli.js",

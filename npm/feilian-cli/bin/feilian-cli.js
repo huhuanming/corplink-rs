@@ -9,7 +9,7 @@ const packages = {
   'darwin-x64': 'feilian-cli-darwin-x64',
   'linux-arm64': 'feilian-cli-linux-arm64',
   'linux-x64': 'feilian-cli-linux-x64',
-  'win32-x64': 'feilian-cli-win32-x64',
+  'win32-x64': 'feilian-cli-windows-x64',
 };
 
 const target = `${process.platform}-${process.arch}`;

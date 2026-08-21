@@ -23,7 +23,8 @@ const targets = [
 await mkdir(outputDirectory, { recursive: true });
 
 for (const target of targets) {
-  const packageName = `feilian-cli-${target.os}-${target.cpu}`;
+  const packagePlatform = target.os === 'win32' ? 'windows' : target.os;
+  const packageName = `feilian-cli-${packagePlatform}-${target.cpu}`;
   const packageDirectory = path.join(outputDirectory, packageName);
   const binaryName = target.os === 'win32' ? 'feilian-cli.exe' : 'feilian-cli';
   const binaryDirectory = path.join(packageDirectory, 'bin');
