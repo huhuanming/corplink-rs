@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const {
@@ -13,6 +15,17 @@ test('compares release versions numerically', () => {
   assert.equal(compareVersions('1.2.0', '1.2'), 0);
   assert.equal(compareVersions('1.2.3', '1.10.0'), -1);
   assert.equal(compareVersions('1.2.3-beta.1', '1.2.3'), 0);
+});
+
+test('--version reports the npm launcher version without starting native code', () => {
+  const launcher = path.join(__dirname, '..', 'bin', 'feilian-cli.js');
+  const result = spawnSync(process.execPath, [launcher, '--version'], {
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout.trim(), 'feilian-cli 1.0.2');
+  assert.equal(result.stderr, '');
 });
 
 test('installs a newer version and returns its launcher', async () => {

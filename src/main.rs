@@ -154,10 +154,12 @@ async fn run() -> Result<()> {
         println!("starting Feilian connection...");
     }
 
-    match update::check().await {
-        Ok(status @ update::UpdateStatus::Available { .. }) => update::report(&status),
-        Ok(update::UpdateStatus::Current { .. }) => {}
-        Err(error) => log::debug!("automatic update check failed: {error:#}"),
+    if env::var_os("FEILIAN_CLI_NPM_LAUNCHER").is_none() {
+        match update::check().await {
+            Ok(status @ update::UpdateStatus::Available { .. }) => update::report(&status),
+            Ok(update::UpdateStatus::Current { .. }) => {}
+            Err(error) => log::debug!("automatic update check failed: {error:#}"),
+        }
     }
 
     print_version();

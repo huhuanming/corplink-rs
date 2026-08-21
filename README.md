@@ -425,7 +425,7 @@ graph TD;
 - 1.0.2
   - automatically install npm updates before starting the native CLI
   - start the newly installed CLI after a successful update and keep the current version running if installation fails
-  - keep `--check-update` as a read-only version check
+  - move npm version reporting and the read-only `--check-update` command into the launcher so future launcher-only releases can reuse existing native packages
 - 1.0.1
   - route primary and backup VPN DNS servers through the WireGuard peer in SOCKS5/netstack mode
 - 1.0.0

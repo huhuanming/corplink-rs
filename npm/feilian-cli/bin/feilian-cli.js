@@ -115,6 +115,16 @@ function findGlobalLauncher() {
   return path.join(result.stdout.trim(), 'feilian-cli', 'bin', 'feilian-cli.js');
 }
 
+async function reportUpdateStatus() {
+  const latestVersion = await fetchLatestVersion();
+  if (compareVersions(latestVersion, currentVersion) > 0) {
+    console.log(`feilian-cli update available: ${currentVersion} -> ${latestVersion}`);
+    console.log('run: npm install --global feilian-cli@latest');
+    return;
+  }
+  console.log(`feilian-cli ${currentVersion} is up to date`);
+}
+
 async function installUpdateIfAvailable(args, dependencies = {}) {
   const {
     fetchVersion = fetchLatestVersion,
@@ -158,8 +168,8 @@ async function installUpdateIfAvailable(args, dependencies = {}) {
   }
 }
 
-function startChild(command, args) {
-  const child = spawn(command, args, { stdio: 'inherit' });
+function startChild(command, args, env = process.env) {
+  const child = spawn(command, args, { stdio: 'inherit', env });
 
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.on(signal, () => child.kill(signal));
@@ -182,6 +192,15 @@ function startChild(command, args) {
 
 async function main() {
   const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === '--check-update') {
+    await reportUpdateStatus();
+    return;
+  }
+  if (args.length === 1 && ['--version', '-V'].includes(args[0])) {
+    console.log(`feilian-cli ${currentVersion}`);
+    return;
+  }
+
   const updatedLauncher = await installUpdateIfAvailable(args);
   if (updatedLauncher === false) {
     return;
@@ -200,7 +219,10 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  startChild(executable, args);
+  startChild(executable, args, {
+    ...process.env,
+    FEILIAN_CLI_NPM_LAUNCHER: '1',
+  });
 }
 
 if (require.main === module) {
