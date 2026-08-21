@@ -1,19 +1,97 @@
-# corplink-rs
+# feilian-cli / corplink-rs
 
-使用 rust 实现的 [飞连][1] 客户端，支持 Linux/Windows10/MacOS
+面向飞连（Feilian / CorpLink）企业租户的非官方跨平台 CLI。输入企业标识、用官方飞连手机 App 扫描二维码并确认 VPN 推送，即可建立企业网络连接；也可以暴露本地 SOCKS5 节点，让 Clash 只把指定企业域名/IP 交给飞连。
 
-> 本仓库为非官方社区 fork，与飞连官方无隶属或背书关系。
+An unofficial cross-platform CLI for Feilian/CorpLink enterprise tenants, with QR login, mobile push approval, system VPN/TUN, and a userspace SOCKS5 endpoint for Clash split routing.
 
-## npm
+> 本项目与飞连官方无隶属关系，也未获得官方背书。它不会绕过企业认证、安全策略或访问控制。兼容性取决于企业租户的飞连版本和管理员策略。
+>
+> This project is not affiliated with or endorsed by Feilian. It does not bypass enterprise authentication or policy enforcement. Compatibility depends on the tenant and its administrator settings.
+
+## 亮点 / Highlights
+
+- 支持采用飞连/CorpLink 的第三方企业租户，通过企业标识自动发现租户服务，不写死任何公司信息。
+- 默认使用二维码登录，无需在终端输入企业密码。
+- 支持飞连手机 App 的 VPN Push MFA；手机点击确认后继续连接。
+- 支持系统 TUN、服务端路由、split/full 模式，以及额外域名和 CIDR 控制。
+- 支持纯用户态 SOCKS5，适合 Clash 按企业域名/IP 精确分流；不创建系统 TUN、路由或 DNS。
+- 一个 npm 主包覆盖 macOS arm64/x64、Linux arm64/x64 和 Windows x64，只安装当前平台二进制。
+- 首次运行交互生成 `~/feilian-cli.config.json`，后续可直接连接，并自动检查新版本。
+
+- Works with third-party Feilian/CorpLink enterprise tenants by discovering the service from the tenant identifier; no organization is hard-coded.
+- QR login by default, without typing the enterprise password into the terminal.
+- Feilian mobile push MFA for VPN approval.
+- System TUN, server-provided routes, split/full modes, and additional domain/CIDR controls.
+- Userspace SOCKS5 for precise Clash routing without changing system interfaces, routes, or DNS.
+- Native npm packages for macOS, Linux, and Windows, with only the current platform binary installed.
+
+## npm 安装 / Install from npm
+
+需要 Node.js 16 或更高版本。
+
+Node.js 16 or newer is required.
 
 ```bash
-npm install --global feilian-cli
+npm install --global feilian-cli@latest
 feilian-cli
 ```
 
-首次运行会交互式询问企业标识和可选的账号/邮箱，将结果写入用户主目录的 `feilian-cli.config.json`，随后直接开始连接。登录方式固定为二维码，VPN 二次验证优先使用飞连客户端推送；仍可通过 `feilian-cli /path/to/config.json` 指定其他配置。`feilian-cli --check-update` 可主动检查更新，正常启动时也会进行一次短暂且不影响连接的更新检查。
+首次运行会询问企业标识和可选账号/邮箱，生成本地配置，然后显示二维码。使用官方飞连 App 扫码确认；如果企业要求 VPN 二次验证，再在手机上确认推送。TUN 模式出现的 `Password:` 是本机管理员密码，不是企业密码。
 
-npm 主包会根据系统仅安装一个原生二进制包，支持 macOS arm64/x64、Linux arm64/x64 和 Windows x64。
+On first run, enter the tenant identifier and optional account/email, scan the QR code with the official Feilian app, and approve the VPN push if required. A `Password:` prompt in TUN mode asks for the local administrator password, not the enterprise password.
+
+```bash
+feilian-cli --version
+feilian-cli --check-update
+feilian-cli /path/to/config.json
+```
+
+## Clash 分流 / Clash split routing
+
+在 `~/feilian-cli.config.json` 中启用用户态 SOCKS5：
+
+Enable userspace SOCKS5 in `~/feilian-cli.config.json`:
+
+```json
+{
+  "company_name": "your-enterprise-id",
+  "username": "you@example.com",
+  "platform": "feilian_qr",
+  "vpn_mfa_type": "push",
+  "socks5_listen": "127.0.0.1:11080",
+  "auto_setup_routes": false,
+  "use_vpn_dns": false
+}
+```
+
+Clash 示例；请把占位域名和网段换成企业管理员提供的实际范围，并把这些规则放在普通代理规则之前：
+
+Clash example; replace the placeholders with enterprise-managed domains and CIDRs, and keep these rules above general proxy rules:
+
+```yaml
+proxies:
+  - name: Feilian-Enterprise
+    type: socks5
+    server: 127.0.0.1
+    port: 11080
+    udp: false
+
+rules:
+  - DOMAIN-SUFFIX,corp.example,Feilian-Enterprise
+  - DOMAIN,portal.corp.example,Feilian-Enterprise
+  - IP-CIDR,10.20.0.0/16,Feilian-Enterprise,no-resolve
+  - MATCH,Your-Existing-Policy
+```
+
+不要把本地 SOCKS5 地址、飞连企业服务端或 VPN 网关再次转发到 `Feilian-Enterprise`，否则会形成环路。企业规则也不应配置公网 fallback；飞连断开时应让企业请求直接失败，避免误发到公网。
+
+Do not route the local SOCKS5 endpoint, tenant service, or VPN gateway back through `Feilian-Enterprise`, which would create a loop. Avoid public fallbacks for enterprise rules so private requests fail closed when Feilian disconnects.
+
+## 致谢 / Acknowledgements
+
+本项目 fork 自 [PinkD/corplink-rs](https://github.com/PinkD/corplink-rs)。感谢 PinkD、上游维护者与所有贡献者提供 Rust 客户端、WireGuard、路由和跨平台基础。本 fork 在此基础上增加 npm 分平台发布、交互式企业配置、飞连二维码登录、手机 Push MFA，以及面向 Clash 的 SOCKS5 分流流程。
+
+This project is forked from [PinkD/corplink-rs](https://github.com/PinkD/corplink-rs). Many thanks to PinkD, the upstream maintainers, and every contributor for the Rust client, WireGuard, routing, and cross-platform foundation. This fork adds per-platform npm distribution, interactive enterprise setup, Feilian QR login, mobile push MFA, and a Clash-oriented SOCKS5 workflow.
 
 # 安装
 
@@ -339,6 +417,12 @@ graph TD;
 
 # Changelog
 
+- 1.0.0
+  - publish `feilian-cli` through npm with native per-platform packages
+  - add interactive enterprise setup and user-home configuration
+  - add Feilian QR login and mobile Push MFA for VPN connections
+  - add official-flow session initialization and persistent WebSocket confirmation handling
+  - document Clash split routing through the userspace SOCKS5 endpoint
 - 0.5.5
   - add more route configs(@yanickxia @zier-one @kfxhjz @ZeppLu)
   - support protocol override config(@n-WN)

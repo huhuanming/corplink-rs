@@ -38,7 +38,7 @@ for (const target of targets) {
   const packageJson = {
     name: packageName,
     version: metaPackage.version,
-    description: `Native ${target.os}-${target.cpu} binary for feilian-cli.`,
+    description: `Native ${target.os}-${target.cpu} binary for feilian-cli: enterprise QR login, mobile push approval, VPN, and SOCKS5.`,
     license: metaPackage.license,
     repository: metaPackage.repository,
     homepage: metaPackage.homepage,
@@ -53,7 +53,7 @@ for (const target of targets) {
   );
   await writeFile(
     path.join(packageDirectory, 'README.md'),
-    `# ${packageName}\n\nNative ${target.os}-${target.cpu} binary used by [feilian-cli](https://www.npmjs.com/package/feilian-cli). Install the main package instead of this package directly.\n`,
+    `# ${packageName}\n\nNative ${target.os}-${target.cpu} binary used by [feilian-cli](https://www.npmjs.com/package/feilian-cli). It provides enterprise QR login, Feilian mobile push approval, VPN, and SOCKS5 support. Install the main package instead of this package directly.\n\n这是 [feilian-cli](https://www.npmjs.com/package/feilian-cli) 使用的 ${target.os}-${target.cpu} 原生二进制包，支持企业二维码登录、飞连手机推送确认、VPN 和 SOCKS5。请安装主包，不要直接安装本平台包。\n`,
   );
 }
 
