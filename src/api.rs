@@ -25,7 +25,7 @@ const URL_QR_TOKEN: &str = "{{url}}/api/login/token";
 const URL_VPN_MFA_TYPE: &str = "{{url}}/api/mfa/type";
 const URL_VPN_MFA_SEND: &str = "{{url}}/api/mfa/code/send";
 const URL_VPN_MFA_VERIFY: &str = "{{url}}/api/mfa/code/verify";
-const URL_VPN_MFA_PUSH: &str = "{{url}}/api/v1/mfa/send";
+const URL_VPN_MFA_PUSH: &str = "{{url}}/api/v1/mfa/send?app_version={{app_version}}&brand={{brand}}&build_number={{build_number}}&client_source={{client_source}}&language={{language}}&model={{model}}&os={{os}}&os_release={{os_release}}&os_version={{version}}&soc={{soc}}&timestamp={{timestamp}}";
 const URL_LOGIN_PASSWORD: &str = "{{url}}/api/login?os={{os}}&os_version={{version}}";
 const URL_LOGIN_PASSWORD_V1: &str =
     "{{url}}/api/v1/login?os={{os}}&os_version={{version}}&client_source=FeiLian";
@@ -253,7 +253,11 @@ impl ApiUrl {
             ApiName::VpnMfaType => self.api_template[name].render(user_param),
             ApiName::VpnMfaSend => self.api_template[name].render(user_param),
             ApiName::VpnMfaVerify => self.api_template[name].render(user_param),
-            ApiName::VpnMfaPush => self.api_template[name].render(user_param),
+            ApiName::VpnMfaPush => {
+                let mut push_param = self.list_vpn_param.clone();
+                push_param.timestamp = unix_timestamp_seconds();
+                self.api_template[name].render(&push_param)
+            }
             ApiName::LoginPassword => self.api_template[name].render(user_param),
             ApiName::LoginPasswordV1 => self.api_template[name].render(user_param),
             ApiName::ListVPN => {
@@ -417,9 +421,12 @@ mod tests {
             api_url.get_api_url(&ApiName::VpnMfaVerify),
             "https://vpn.example.com/api/mfa/code/verify"
         );
-        assert_eq!(
-            api_url.get_api_url(&ApiName::VpnMfaPush),
-            "https://vpn.example.com/api/v1/mfa/send"
-        );
+        let push_url = api_url.get_api_url(&ApiName::VpnMfaPush);
+        assert!(push_url.starts_with(
+            "https://vpn.example.com/api/v1/mfa/send?app_version=3.3.17&brand=&build_number=8135&client_source=FeiLian&language=en&model=&os=Linux&os_release="
+        ));
+        assert!(push_url.contains("&os_version="));
+        assert!(push_url.contains("&soc="));
+        assert!(push_url.contains("&timestamp="));
     }
 }
